@@ -56,10 +56,22 @@ if (!cfg?.SUPABASE_URL || !cfg?.SUPABASE_ANON_KEY) {
   throw new Error("missing config");
 }
 
+// Bumped on every edit so the status panel proves which JS the browser ran -
+// otherwise a cached page is indistinguishable from a logic bug.
+const BUILD = "v3";
+
+// The only trustworthy "we just came back from Planning Center" signal.
+// SIGNED_IN is not one: it was observed firing on a hard reload of an existing
+// session, which is how the first two attempts at this gate failed. Read
+// synchronously at module load, before supabase-js exchanges the code and
+// strips it from the URL.
+const OAUTH_RETURN = new URLSearchParams(window.location.search).has("code");
+
 const supabase = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
 const fnUrl = (name) => `${cfg.SUPABASE_URL}/functions/v1/${name}`;
 
 let stored = false;
+let lastEvent = null;
 
 async function callFunction(name, body) {
   const { data: { session } } = await supabase.auth.getSession();
@@ -118,11 +130,19 @@ function render(session) {
   $("disconnect").disabled = !session;
   $("signout").disabled = !session;
   show("status", session
-    ? { signed_in_as: session.user.email, supabase_user_id: session.user.id }
-    : "Signed out.");
+    ? {
+        build: BUILD,
+        last_event: lastEvent,
+        oauth_return: OAUTH_RETURN,
+        will_store_tokens: OAUTH_RETURN,
+        signed_in_as: session.user.email,
+        supabase_user_id: session.user.id,
+      }
+    : { build: BUILD, state: "Signed out." });
 }
 
 supabase.auth.onAuthStateChange(async (event, session) => {
+  lastEvent = event;
   render(session);
   if (!session) return;
 
@@ -131,7 +151,7 @@ supabase.auth.onAuthStateChange(async (event, session) => {
   // provider tokens - storing there too would re-upsert on every reload,
   // spending two PCO API calls each time and resetting refreshed_at. Show the
   // panel either way; only write on a genuine sign-in.
-  await captureProviderTokens(session, { store: event === "SIGNED_IN" });
+  await captureProviderTokens(session, { store: OAUTH_RETURN });
 });
 
 $("connect").onclick = () => supabase.auth.signInWithOAuth({
