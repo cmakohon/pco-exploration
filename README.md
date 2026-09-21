@@ -168,7 +168,20 @@ npx serve web -l 3000
 6. Temporarily drop the `User-Agent` header in `pcoFetch` and watch for the
    `403`. Restore it. Worth seeing once.
 7. Click **Disconnect**, then **Call /people/v2/me** → a clean 404
-   "No Planning Center connection", not a 500.
+   "No Planning Center connection", not a 500. Confirm the revocation took at
+   PCO's end too, not just locally: the stored access token should go from 200
+   to 401 against `/people/v2/me`. Revoking the refresh token invalidates its
+   access token, so revoking the one is enough.
+8. Vault checks, all four of which have failure modes that are invisible from
+   the app:
+   - `service_role` can decrypt through `pco_connection_get`.
+   - `anon` calling the same RPC gets `42501 permission denied`. Without the
+     explicit `REVOKE`, PostgreSQL's default grant to `PUBLIC` would expose
+     every user's tokens through a definer function.
+   - `/rest/v1/decrypted_secrets` returns 404 — the vault schema is not exposed.
+   - After a refresh, the two `vault.secrets` ids are **unchanged** while the
+     tokens differ. Changing ids would mean rotation creates a new secret every
+     time and orphans the old, growing the vault by two entries per refresh.
 
 ## Fallback if the provider refresh token does not come through
 
