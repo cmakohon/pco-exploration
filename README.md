@@ -186,6 +186,14 @@ the feature is broken.
 
 ## Gotchas found in practice
 
+**supabase-js defaults to the implicit flow, not PKCE.** `DEFAULT_OPTIONS` in
+GoTrueClient sets `flowType: 'implicit'`, so the browser client returns the
+Supabase access token *and* the PCO provider tokens in the URL fragment, where
+they persist in browser history. It also means `?code=` never appears, which
+silently broke the storage gate below. Pass `flowType: 'pkce'` explicitly when
+creating the client — worth doing for the credential handling alone, separately
+from the gate.
+
 **`SIGNED_IN` does not mean "just logged in".** It was observed firing on a hard
 reload of an existing session, because supabase-js persists the session (provider
 tokens included) to localStorage and re-emits on recovery. Gating any write on it

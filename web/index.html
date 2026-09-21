@@ -61,16 +61,29 @@ if (!cfg?.SUPABASE_URL || !cfg?.SUPABASE_ANON_KEY) {
 
 // Bumped on every edit so the status panel proves which JS the browser ran -
 // otherwise a cached page is indistinguishable from a logic bug.
-const BUILD = "v4";
+const BUILD = "v5";
 
-// The only trustworthy "we just came back from Planning Center" signal.
-// SIGNED_IN is not one: it was observed firing on a hard reload of an existing
-// session, which is how the first two attempts at this gate failed. Read
-// synchronously at module load, before supabase-js exchanges the code and
-// strips it from the URL.
-const OAUTH_RETURN = new URLSearchParams(window.location.search).has("code");
+// "We just came back from Planning Center" - read synchronously at module load,
+// before supabase-js consumes the URL and strips it.
+//
+// SIGNED_IN is not a usable signal: it fires on a hard reload of an existing
+// session. And checking only ?code= was not enough either, because supabase-js
+// defaults to flowType 'implicit' (confirmed in GoTrueClient DEFAULT_OPTIONS),
+// which returns everything in the hash and never sets ?code=. Both are checked
+// so this keeps working whichever flow is configured.
+const qs = new URLSearchParams(window.location.search);
+const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+const OAUTH_RETURN = qs.has("code") || hash.has("access_token") || hash.has("provider_token");
 
-const supabase = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+const supabase = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
+  auth: {
+    // Explicit, not defaulted. Under the implicit flow the access token and the
+    // PCO provider tokens are returned in the URL fragment, where they land in
+    // browser history and are readable by anything on the page. PKCE keeps them
+    // out of the URL entirely and exchanges a one-time code instead.
+    flowType: "pkce",
+  },
+});
 const fnUrl = (name) => `${cfg.SUPABASE_URL}/functions/v1/${name}`;
 
 let stored = false;
@@ -149,6 +162,11 @@ function render(session) {
         build: BUILD,
         last_event: lastEvent,
         oauth_return: OAUTH_RETURN,
+        detected_via: qs.has("code")
+          ? "?code= (pkce)"
+          : (hash.has("access_token") || hash.has("provider_token"))
+            ? "#fragment (implicit)"
+            : "none",
         will_store_tokens: OAUTH_RETURN,
         signed_in_as: session.user.email,
         supabase_user_id: session.user.id,
