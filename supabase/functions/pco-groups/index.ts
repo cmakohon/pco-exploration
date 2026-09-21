@@ -279,12 +279,48 @@ Deno.serve(handler(async (req) => {
   // What a sideloaded Person actually carries here. If it carries no contact
   // route, the roster is a list of strangers and the product needs the service
   // connection after all.
-  const includedPersonKeys = Array.isArray((memIncluded?.body as Doc)?.included)
-    ? keysOf(
-      (memIncluded!.body as Doc).included.find((r: Doc) => /person/i.test(String(r?.type)))
-        ?.attributes,
-    )
+  const includedPersons: Doc[] = Array.isArray((memIncluded?.body as Doc)?.included)
+    ? (memIncluded!.body as Doc).included.filter((r: Doc) => /person/i.test(String(r?.type)))
     : [];
+  const includedPersonKeys = keysOf(includedPersons[0]?.attributes);
+
+  /**
+   * Are the contact arrays POPULATED, or merely present?
+   *
+   * 10.4 recorded the attribute names and deliberately not the values, which
+   * left 10.10's second item open: a roster you can see but cannot reach is a
+   * list of strangers, and the group tier is a different product if these come
+   * back empty.
+   *
+   * Counts and presence only - never a value, never a partial value, never a
+   * domain. "How many people have at least one email" answers the product
+   * question completely and discloses nothing about any of them.
+   */
+  function populationOf(field: string) {
+    let withAny = 0;
+    let total = 0;
+    for (const p of includedPersons) {
+      const v = (p?.attributes ?? {})[field];
+      const n = Array.isArray(v) ? v.length : (v ? 1 : 0);
+      total += n;
+      if (n > 0) withAny++;
+    }
+    return {
+      people_with_at_least_one: withAny,
+      of_people: includedPersons.length,
+      total_entries: total,
+    };
+  }
+  const contactPopulation = includedPersons.length > 0
+    ? {
+      email_addresses: populationOf("email_addresses"),
+      phone_numbers: populationOf("phone_numbers"),
+      addresses: populationOf("addresses"),
+      // The one non-contact field worth counting: an avatar is the difference
+      // between a roster that looks like people and one that looks like rows.
+      avatar_url: populationOf("avatar_url"),
+    }
+    : null;
 
   // Does the roster include ME?
   //
@@ -555,6 +591,10 @@ Deno.serve(handler(async (req) => {
         // member token can see WHO is in their group but cannot reach them,
         // and the product needs the church's identity to close the loop.
         person_attribute_keys: includedPersonKeys,
+        people_returned: includedPersons.length,
+        // Counts only. Answers "can we reach these people" without saying
+        // anything about any one of them.
+        contact_population: contactPopulation,
       },
     },
 

@@ -1195,6 +1195,11 @@ Six candidates probed, all `200`, four yielding group ids:
   your groups, not theirs. Untested, and it is the one open question here with a
   security shape (10.10).
 
+  > **Answered in 14.1, and the guess above was too kind.** The filter is
+  > discarded and the collection returns every membership the caller may see -
+  > two, at a church where the named person holds one. Use the path form,
+  > `/groups/v2/people/{id}/memberships`.
+
 Use `/groups/v2/me/groups`. It is the cheapest, it needs no person id, and it
 returns `Group` rather than a join row.
 
@@ -1447,10 +1452,10 @@ Ranked by how much the answer changes the design.
   `phone_numbers` are present as *keys*; whether they carry values on a group
   roster is unverified, and the group tier is a different product if they are
   empty.
-- **Whether `/groups/v2/memberships?where[person_id]=<a stranger>` leaks.** 10.5
-  proves unknown `where[]` keys are ignored, so that collection may be
-  self-scoped and the filter cosmetic - or it may not be self-scoped at all.
-  The only open question here with a security shape.
+- ~~**Whether `/groups/v2/memberships?where[person_id]=<a stranger>` leaks.**~~
+  **Answered in 14.1:** the filter is discarded and the collection is not
+  self-scoped. It does not leak past the row filter of 13.5, but it answers a
+  larger question than it was asked, with a `200`.
 - **`group_type` through the `include` door.** The collection is empty (10.6);
   `can_include` offers it. If the include answers, 9.2's rule generalizes across
   products and the taxonomy is usable.
@@ -2340,3 +2345,119 @@ were none to inspect.
   query, and what the other codes are. One event, one status.
 - **Whether `percent_approved` settling is the only field that moves without
   `updated_at`** (13.4), or whether others do too. One observation, one field.
+
+---
+
+## 14. A filter that does not filter, on the data where it matters
+
+Two people added to Charlotte Church's test group - the last unexercised path at
+the administrator pole (13.8).
+
+**Verdict: `/groups/v2/memberships?where[person_id]=…` returns every membership
+the caller can see, not that person's.** The filter is discarded, the response
+is a `200`, and the count is larger than the question asked for. 10.3 flagged
+this as the only open question in this file with a security shape; it is
+answered, and the answer is the bad one.
+
+The roster path itself is confirmed at both poles, and the two probe defects
+from 10.9 and 12.8 are verified fixed by the run that could finally exercise
+them.
+
+### 14.1 The membership filter is discarded
+
+The test group holds two memberships: the administrator and one other person.
+Asked two ways, in the same request:
+
+| Request | `total_count` | What it means |
+|---|---|---|
+| `/groups/v2/people/202345396/memberships` | **1** | correct - this person's membership |
+| `/groups/v2/memberships?where[person_id]=202345396` | **2** | every membership in the church |
+
+`person_id` is not a key the collection declares, so 13.1's rule applies
+unchanged: **PCO discards it and answers the unfiltered question.** This is the
+concrete instance of "the failure mode is a larger answer rather than an error",
+landing on the one table in Groups that maps people to each other.
+
+**It is not a permission leak.** The row filter of 13.5 and 12.5 still applies -
+the administrator sees two because there are two and they may see both. A member
+would get the memberships within their own groups and no further. Nothing
+crosses a tenant or a visibility boundary.
+
+**It is worse than it sounds anyway**, because the caller cannot tell. An app
+that asks for one person's memberships and renders the answer will render
+everyone's, having received a `200` that says it asked correctly. At Hope City
+the same request returned rows spanning two groups totalling 67 memberships; the
+probe did not record `total_count` at the time (10.9's second defect), so what
+that member actually received was never measured.
+
+**Use the path form.** `/groups/v2/people/{id}/memberships` is scoped by the URL
+rather than by a query key, and query keys are the thing that silently fail.
+The rule generalises past this endpoint:
+
+> **Prefer a scoped path over a `where` clause whenever both exist.** A path
+> that does not exist returns `404`. A `where` key that does not exist returns
+> everything.
+
+10.3 recommended `/groups/v2/me/groups` for the "my groups" question on grounds
+of cheapness. That recommendation is now on firmer ground: of the four doors
+that work, the two path-scoped ones (`/me/groups`,
+`/people/{id}/memberships`) are correct, and the query-scoped one is not.
+
+### 14.2 The roster, confirmed at the administrator pole
+
+`GET /groups/v2/groups/3242172/memberships?per_page=25&include=person`
+
+```
+total_count: 2   returned: 2   page_is_whole_collection: true
+includes_caller: true   includes_caller_conclusive: true
+person_attribute_keys: addresses, avatar_url, created_at, email_addresses,
+                       first_name, gender, last_name, permissions, phone_numbers
+```
+
+Identical attribute set to Hope City's 55-person roster (10.4), from the
+opposite pole. The roster read is not a member-only affordance or an
+administrator-only one; it is the same shape for both.
+
+**Both probe defects are verified fixed by this run**, and neither could have
+been checked before it. `includes_caller` is now computed over every returned
+row rather than the five-row redacted sample (10.9), and it reports `true` with
+`includes_caller_conclusive: true` because `page_is_whole_collection` holds -
+two of two. The empty-church verdict bug from 12.8 is gone: the probe reports
+`own_groups_and_roster_readable` rather than claiming a forbidden roster.
+
+**`memberships_count` on the group tracks reality** - `0`, then `2`, across
+runs. It is the cheap density signal 10.6 hoped it was.
+
+**Contact population is still unmeasured**, and it is now the last thing
+standing between this spike and a decision about the group tier. 10.4 recorded
+the attribute *names*; whether `email_addresses` and `phone_numbers` carry
+values has never been observed, and a roster you can see but cannot reach is a
+list of strangers. The probe now counts them - people with at least one entry,
+never a value, never a partial one - but the count must be taken at a **real**
+church. Two accounts the tester created at a test organization would answer the
+wrong question (14.3).
+
+### 14.3 Still not tested
+
+- **Whether the contact arrays carry values at a real church.** The measurement
+  exists now; it needs one run of `pco-groups` at Hope City, whose 55-person
+  roster is the only real data available. This is the single remaining question
+  that changes whether the group tier is a product.
+- **Whether `/groups/v2/memberships` declares any usable query key.** 14.1
+  proves `person_id` is discarded but the probe never captured that collection's
+  `meta.can_query_by`. If it declares `group_id`, the collection becomes useful
+  rather than merely dangerous.
+- **What a member sees from `/groups/v2/memberships`.** 14.1 reasons it is the
+  memberships within their own groups, from 13.5's row filter. Reasoned, not
+  observed, and the `total_count` that would have shown it was not recorded at
+  the time.
+- **A group with a leader.** Both Charlotte memberships came back `role:
+  "member"`; Hope City's roster showed `leader`, but only in the five-row
+  sample. Whether `role` is queryable, and what values exist, is unknown - and
+  routing care to a group's *leader* is an obvious product need.
+- **`/groups/v2/groups/{id}/events`.** Still zero events at Charlotte Church,
+  so the only candidate source for a group's real meeting times (13.6) remains
+  unexercised at either pole.
+- **Everything carried forward from 13.8** that this run did not touch:
+  `published_starts_at` versus `starts_at`, resource bookings and the paid
+  tier, and the `approval_status` value set.
