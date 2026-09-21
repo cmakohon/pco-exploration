@@ -403,6 +403,16 @@ Verified live against two real PCO organizations - Hope City Church Charlotte
 (where the tester is an ordinary member) and Charlotte Church (where they are an
 Organization Administrator).
 
+**Verdict: the model holds.** One Supabase account acts as an owner at one
+church and a plain member at another, with four independent Vault secrets, no
+cross-tenant leakage, and a registration gate that refuses the right people for
+the right reason. Two branches remain untested for want of a third person
+(8.10); everything else below was observed, not inferred.
+
+The risk that could have invalidated the design - PCO scoping a Person to an
+organization, so the same human has a different `sub` per church - turned out
+not to bite, for a reason nobody would predict from the docs (8.2).
+
 ### 8.1 The admin gate
 
 **Assert on `data.attributes.site_administrator` from `/people/v2/me`. Nothing
@@ -623,9 +633,15 @@ why the Status panel reports `provider_tokens_in_memory`.
 
 ### 8.9 Verified at the boundary
 
-- **Revocation does not cross tenants.** Disconnecting one church revoked its
-  refresh token at PCO while the other church's access token still returned
-  `200`. Verified against PCO, not against our own rows (5.3).
+- **Revocation reaches PCO, and only for that church.** The disconnected
+  church's own access token went `200` -> `401` when curled directly at PCO
+  before and after, while the other church's token continued to answer `200`.
+  Verified against Planning Center, never against our own rows (5.3). Deleting
+  a row is not revoking a token, and only this test knows the difference.
+- **The self-heal works through the ordinary path.** After a degrade, simply
+  reconnecting as the owner restored `is_service` and flipped the church back to
+  `active` - no recovery flow, no manual step. Reconnect also minted a fresh
+  Vault secret pair rather than reusing the deleted one, as it should.
 - **Disconnect degrades visibly rather than silently.** `was_service: true`,
   `promoted_connection_id: null`, `organization_degraded: true`, the connection
   row gone, and the vault invariant back to `true` - both secrets deleted with
