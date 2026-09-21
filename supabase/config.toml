@@ -37,3 +37,9 @@ verify_jwt = false
 
 [functions.pco-disconnect]
 verify_jwt = false
+
+[functions.org-register]
+verify_jwt = false
+
+[functions.org-status]
+verify_jwt = false

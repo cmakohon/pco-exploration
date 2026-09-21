@@ -5,6 +5,11 @@
 //   - access tokens expire after 2 hours
 //   - refresh tokens ROTATE: every refresh returns a new one that must be stored
 //   - PCO returns 403 for any request without a descriptive User-Agent
+//
+// Multi-tenant note: a connection is now per (user, church), not per user.
+// Every helper that used to take a userId takes a resolved connection or an
+// (userId, orgId) pair. There is deliberately no way to ask for "this user's
+// connection" without naming a church.
 
 import { createClient, type SupabaseClient } from "jsr:@supabase/supabase-js@2";
 
@@ -39,10 +44,14 @@ function requireEnv(name: string): string {
 }
 
 export interface PcoConnection {
+  id: string;
   user_id: string;
+  organization_id: string;
   pco_person_id: string;
-  organization_id: string | null;
-  organization_name: string | null;
+  pco_organization_id: string | null;
+  pco_organization_name: string | null;
+  is_service: boolean;
+  role: string;
   access_token: string;
   refresh_token: string;
   scope: string;
@@ -103,6 +112,16 @@ export async function fetchUserInfo(accessToken: string) {
 }
 
 /**
+ * PCO's organization_id is an integer in OIDC claims and a string in JSON:API
+ * resource ids. Normalize once, here, so nothing downstream has to remember.
+ */
+export function normalizeOrgId(value: number | string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const s = String(value).trim();
+  return s.length > 0 ? s : null;
+}
+
+/**
  * Ask PCO about a token. Returns the exact `exp` and granted `scope`, which is
  * better than assuming now + 7200 when we did not perform the exchange
  * ourselves (Supabase Auth did).
@@ -126,6 +145,13 @@ export async function introspect(token: string) {
     exp?: number;
     iat?: number;
   };
+}
+
+/** Exact expiry from an introspection result, or a conservative fallback. */
+export function expiresAtFrom(info: { exp?: number }): string {
+  return info.exp
+    ? new Date(info.exp * 1000).toISOString()
+    : new Date(Date.now() + 7200 * 1000).toISOString();
 }
 
 /**
@@ -176,55 +202,86 @@ export async function revokeToken(
   });
 }
 
-export async function getConnection(admin: SupabaseClient, userId: string) {
-  // Tokens live in Vault and the vault schema is not exposed through
-  // PostgREST, so this RPC is the only path that decrypts them.
+/**
+ * Read one church's connection for one user, tokens decrypted.
+ *
+ * The RPC joins memberships and organizations inside the same statement that
+ * joins vault.decrypted_secrets, so a caller who is not an active member of an
+ * active church gets zero rows rather than a token. That is the authorization
+ * boundary; this function is not it.
+ */
+export async function getConnection(
+  admin: SupabaseClient,
+  userId: string,
+  orgId: string,
+): Promise<PcoConnection> {
   const { data, error } = await admin
-    .rpc("pco_connection_get", { p_user_id: userId })
+    .rpc("pco_connection_get", { p_user_id: userId, p_org_id: orgId })
     .maybeSingle();
   if (error) throw new HttpError(500, error.message);
-  if (!data) throw new HttpError(404, "No Planning Center connection for this user");
+  if (!data) {
+    throw new HttpError(404, "No Planning Center connection for this user and church");
+  }
+  return data as PcoConnection;
+}
+
+/** The church's background identity. There is no user in a webhook. */
+export async function getServiceConnection(
+  admin: SupabaseClient,
+  orgId: string,
+): Promise<PcoConnection> {
+  const { data, error } = await admin
+    .rpc("pco_connection_get_service", { p_org_id: orgId })
+    .maybeSingle();
+  if (error) throw new HttpError(500, error.message);
+  if (!data) {
+    throw new HttpError(409, `Church ${orgId} has no usable service connection`);
+  }
   return data as PcoConnection;
 }
 
 /**
- * Return a valid access token for the user, refreshing and persisting first if
- * the stored one is expired or about to be.
+ * Return a valid access token for a connection, refreshing and persisting
+ * first if the stored one is expired or about to be.
  */
 export async function validAccessToken(
   admin: SupabaseClient,
-  userId: string,
+  conn: PcoConnection,
 ): Promise<string> {
-  const conn = await getConnection(admin, userId);
-
   const expiresAt = new Date(conn.expires_at).getTime();
   const threshold = Date.now() + EXPIRY_SKEW_SECONDS * 1000;
   if (expiresAt > threshold) return conn.access_token;
 
   const fresh = await refreshAccessToken(conn.refresh_token);
 
-  // Writes both rotated secrets into Vault in place. The refresh token is
-  // rotated - failing to persist it breaks the chain.
+  // Writes both rotated secrets into Vault in place, keyed on the connection -
+  // not the user, who may hold several. The refresh token is rotated; failing
+  // to persist it breaks the chain.
   const { error } = await admin.rpc("pco_connection_rotate", {
-    p_user_id: userId,
+    p_connection_id: conn.id,
     p_access: fresh.access_token,
     p_refresh: fresh.refresh_token,
     p_expires_at: new Date((fresh.created_at + fresh.expires_in) * 1000).toISOString(),
   });
-  if (error) throw new HttpError(500, `Failed to persist refreshed token: ${error.message}`);
+  if (error) {
+    throw new HttpError(500, `Failed to persist refreshed token: ${error.message}`);
+  }
 
   return fresh.access_token;
 }
 
-/** Call the PCO API on a user's behalf. Handles refresh transparently. */
-export async function pcoFetch(
-  admin: SupabaseClient,
-  userId: string,
+/**
+ * Call the PCO API with a bare access token.
+ *
+ * Needed by the registration path, which must ask PCO whether the caller is an
+ * Organization Administrator BEFORE any token has been stored. Every other
+ * caller should go through pcoFetch so refresh is handled.
+ */
+export async function pcoFetchWithToken(
+  accessToken: string,
   path: string,
   init: RequestInit = {},
 ) {
-  const accessToken = await validAccessToken(admin, userId);
-
   const res = await fetch(`${PCO_API_BASE}${path}`, {
     ...init,
     headers: {
@@ -238,6 +295,28 @@ export async function pcoFetch(
     throw new HttpError(res.status, `PCO ${path} failed: ${await res.text()}`);
   }
   return await res.json();
+}
+
+/** Call the PCO API on a connection's behalf. Handles refresh transparently. */
+export async function pcoFetch(
+  admin: SupabaseClient,
+  conn: PcoConnection,
+  path: string,
+  init: RequestInit = {},
+) {
+  const accessToken = await validAccessToken(admin, conn);
+  return await pcoFetchWithToken(accessToken, path, init);
+}
+
+/** Call the PCO API as a church's service identity, for background work. */
+export async function pcoFetchAsService(
+  admin: SupabaseClient,
+  orgId: string,
+  path: string,
+  init: RequestInit = {},
+) {
+  const conn = await getServiceConnection(admin, orgId);
+  return await pcoFetch(admin, conn, path, init);
 }
 
 function formBody(params: Record<string, string>): URLSearchParams {

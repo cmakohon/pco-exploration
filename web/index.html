@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Planning Center OAuth spike</title>
+<title>Planning Center multi-tenant spike</title>
 <style>
   :root { color-scheme: light dark; }
   body { font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; max-width: 52rem;
@@ -14,22 +14,31 @@
            border-radius: .4rem; border: 1px solid #8884; cursor: pointer;
            background: #8881; }
   button:disabled { opacity: .45; cursor: not-allowed; }
+  button.small { padding: .2rem .5rem; font-size: 12px; margin: 0 0 0 .5rem; }
   pre { background: #8881; padding: .9rem; border-radius: .5rem;
         overflow-x: auto; font-size: 13px; }
   h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em;
        color: #888; margin: 1.6rem 0 .4rem; }
   .ok { color: #2e9e5b; } .bad { color: #d4453c; }
+  .church { background: #8881; padding: .6rem .9rem; border-radius: .5rem;
+            margin-bottom: .4rem; font-size: 13px; }
+  .church.active { outline: 2px solid #2e9e5b88; }
+  .church b { font-size: 14px; }
+  .muted { color: #888; }
 </style>
 </head>
 <body>
 
-<h1>Planning Center OAuth spike</h1>
-<p class="sub">Proves the confidential authorization-code flow end to end.</p>
+<h1>Planning Center multi-tenant spike</h1>
+<p class="sub">Churches are tenants. A church must be registered by one of its
+Organization Administrators before its members can link.</p>
 
 <div>
   <button id="connect">Connect Planning Center</button>
+  <button id="register" disabled>Register this church</button>
+  <button id="link" disabled>Link another church</button>
   <button id="me" disabled>Call /people/v2/me</button>
-  <button id="disconnect" disabled>Disconnect</button>
+  <button id="disconnect" disabled>Disconnect this church</button>
   <button id="signout" disabled>Sign out</button>
 </div>
 
@@ -39,8 +48,17 @@
 <h2>Provider token check <span id="verdict"></span></h2>
 <pre id="tokens">Not signed in yet.</pre>
 
-<h2>Capture (token storage)</h2>
-<pre id="capture">Nothing captured yet.</pre>
+<h2>Tenancy decision</h2>
+<pre id="tenancy">No decision yet.</pre>
+
+<h2>Churches</h2>
+<div id="churches"><pre class="muted">—</pre></div>
+
+<h2>Registration</h2>
+<pre id="register-out">—</pre>
+
+<h2>Identity linking (experiment E-2) <span id="link-verdict"></span></h2>
+<pre id="linking">Not attempted.</pre>
 
 <h2>Result</h2>
 <pre id="result">—</pre>
@@ -61,7 +79,7 @@ if (!cfg?.SUPABASE_URL || !cfg?.SUPABASE_ANON_KEY) {
 
 // Bumped on every edit so the status panel proves which JS the browser ran -
 // otherwise a cached page is indistinguishable from a logic bug.
-const BUILD = "v5";
+const BUILD = "v6";
 
 // "We just came back from Planning Center" - read synchronously at module load,
 // before supabase-js consumes the URL and strips it.
@@ -75,21 +93,43 @@ const qs = new URLSearchParams(window.location.search);
 const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
 const OAUTH_RETURN = qs.has("code") || hash.has("access_token") || hash.has("provider_token");
 
+// Set before redirecting into linkIdentity, read on the way back. sessionStorage
+// rather than a variable because the redirect destroys the page.
+const LINKING_BEFORE = sessionStorage.getItem("linking_before");
+sessionStorage.removeItem("linking_before");
+
 const supabase = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
   auth: {
     // Explicit, not defaulted. Under the implicit flow the access token and the
     // PCO provider tokens are returned in the URL fragment, where they land in
     // browser history and are readable by anything on the page. PKCE keeps them
     // out of the URL entirely and exchanges a one-time code instead.
+    //
+    // It is also what makes linkIdentity able to return provider tokens at all:
+    // the PKCE code exchange attaches them unconditionally, the implicit flow
+    // only does so when a new session is issued - which linking does not do.
     flowType: "pkce",
   },
 });
 const fnUrl = (name) => `${cfg.SUPABASE_URL}/functions/v1/${name}`;
 
-let stored = false;
-let lastEvent = null;
+// THE ONE-SHOT TRAP. provider_token and provider_refresh_token exist in the
+// session only immediately after sign-in. Registration needs them AFTER
+// pco-store-tokens has come back and said the church is unregistered, so they
+// are held here across that round trip.
+//
+// A page reload destroys them, and the register button then fails in a way that
+// looks exactly like a permissions bug. That is why the Status panel reports
+// provider_tokens_in_memory - without it, the cause is invisible.
+let heldProviderTokens = null;
 
-async function callFunction(name, body) {
+let lastEvent = null;
+let activeOrgId = localStorage.getItem("pco_active_org") || null;
+let activeRole = null;
+let activeConnectionId = null;
+let churches = [];
+
+async function callFunctionRaw(name, body) {
   const { data: { session } } = await supabase.auth.getSession();
   if (!session) throw new Error("No Supabase session");
   const res = await fetch(fnUrl(name), {
@@ -101,15 +141,20 @@ async function callFunction(name, body) {
     },
     body: JSON.stringify(body ?? {}),
   });
-  const json = await res.json();
-  if (!res.ok) throw new Error(json.error ?? res.statusText);
-  return json;
+  return { status: res.status, body: await res.json() };
 }
 
-// THE GO/NO-GO. provider_token and provider_refresh_token are present in the
-// session only immediately after sign-in and vanish on the next session
-// refresh, so they have to be captured here and handed to the server at once.
-async function captureProviderTokens(session, { store }) {
+async function callFunction(name, body) {
+  const res = await callFunctionRaw(name, body);
+  if (res.status >= 400) throw new Error(res.body.error ?? res.body.message ?? res.status);
+  return res.body;
+}
+
+// ---------------------------------------------------------------------------
+// Provider tokens
+// ---------------------------------------------------------------------------
+
+function showProviderTokens(session) {
   const hasAccess = Boolean(session?.provider_token);
   const hasRefresh = Boolean(session?.provider_refresh_token);
 
@@ -126,38 +171,167 @@ async function captureProviderTokens(session, { store }) {
   $("verdict").className = hasRefresh ? "ok" : "bad";
   $("verdict").textContent = hasRefresh ? "PASS" : (hasAccess ? "FAIL" : "");
 
-  // Display only - storing is the caller's decision.
-  if (!store) {
-    show("capture", `Skipped: not an OAuth return (oauth_return=${OAUTH_RETURN}).`
-      + " Tokens are only stored on the redirect back from Planning Center.");
-    return;
-  }
-  if (!hasAccess || !hasRefresh) {
-    show("capture", "Skipped: Supabase did not supply both provider tokens. "
-      + `provider_token=${hasAccess}, provider_refresh_token=${hasRefresh}`);
-    return;
-  }
-  if (stored) return;
-
-  show("capture", "Storing…");
-  try {
-    const res = await callFunction("pco-store-tokens", {
+  if (hasAccess && hasRefresh) {
+    heldProviderTokens = {
       provider_token: session.provider_token,
       provider_refresh_token: session.provider_refresh_token,
+    };
+  }
+  return hasAccess && hasRefresh;
+}
+
+// ---------------------------------------------------------------------------
+// The tenancy decision
+// ---------------------------------------------------------------------------
+
+async function attemptJoin() {
+  if (!heldProviderTokens) {
+    show("tenancy", "Skipped: Supabase did not supply both provider tokens.");
+    return;
+  }
+
+  show("tenancy", "Deciding…");
+  const res = await callFunctionRaw("pco-store-tokens", heldProviderTokens);
+  show("tenancy", { http_status: res.status, ...res.body });
+
+  if (res.body.stored) {
+    heldProviderTokens = null;
+    setActiveOrg(res.body.organization.id);
+    await refreshChurches();
+    return;
+  }
+
+  // Refused. The tokens are still in memory, so registration is one click away
+  // when the server says this person is an Organization Administrator.
+  $("register").disabled = !res.body.can_register || !heldProviderTokens;
+
+  // The auth user was reaped - the JWT is dead, so there is nothing left to do
+  // with this session. The server only reaps when can_register is false.
+  if (res.body.action === "sign_out") {
+    await supabase.auth.signOut();
+    show("tenancy", {
+      http_status: res.status,
+      ...res.body,
+      note: "Signed out: this account has no tenancy and was removed.",
     });
-    stored = true;
-    show("capture", { stored: true, ...res });
-  } catch (err) {
-    // Its own panel, so a later pco-me call cannot overwrite the evidence.
-    show("capture", `STORE FAILED: ${err.message}`);
   }
 }
 
-function render(session) {
-  $("me").disabled = !session;
-  $("disconnect").disabled = !session;
-  $("signout").disabled = !session;
-  show("status", session
+// ---------------------------------------------------------------------------
+// Churches
+// ---------------------------------------------------------------------------
+
+function setActiveOrg(id) {
+  activeOrgId = id;
+  if (id) localStorage.setItem("pco_active_org", id);
+  else localStorage.removeItem("pco_active_org");
+}
+
+async function refreshChurches() {
+  const session = await currentSession();
+  if (!session) {
+    churches = [];
+    $("churches").innerHTML = '<pre class="muted">Signed out.</pre>';
+    renderStatus(null);
+    return;
+  }
+  try {
+    const status = await callFunction("org-status");
+    churches = status.churches ?? [];
+    if (!activeOrgId || !churches.some((c) => c.organization.id === activeOrgId)) {
+      setActiveOrg(status.active_organization_id);
+    }
+    renderChurches();
+  } catch (err) {
+    $("churches").innerHTML = "";
+    const pre = document.createElement("pre");
+    pre.textContent = `org-status failed: ${err.message}`;
+    $("churches").append(pre);
+    churches = [];
+  }
+  renderStatus(session);
+}
+
+function renderChurches() {
+  const host = $("churches");
+  host.innerHTML = "";
+
+  if (!churches.length) {
+    const pre = document.createElement("pre");
+    pre.className = "muted";
+    pre.textContent = "No churches. Either your church has not registered, or you have not connected.";
+    host.append(pre);
+    return;
+  }
+
+  for (const c of churches) {
+    const o = c.organization;
+    const isActive = o.id === activeOrgId;
+    if (isActive) {
+      activeRole = c.role;
+      activeConnectionId = c.connection?.id ?? null;
+    }
+
+    const div = document.createElement("div");
+    div.className = "church" + (isActive ? " active" : "");
+
+    const head = document.createElement("div");
+    const b = document.createElement("b");
+    b.textContent = o.name;
+    head.append(b);
+    head.append(document.createTextNode(
+      ` — ${c.role} (${c.membership_status}) · org ${o.status} · pco ${o.pco_organization_id}`
+    ));
+
+    if (!isActive) {
+      const btn = document.createElement("button");
+      btn.className = "small";
+      btn.textContent = "Make active";
+      btn.onclick = async () => {
+        await callFunction("org-status", { organization_id: o.id });
+        setActiveOrg(o.id);
+        await refreshChurches();
+      };
+      head.append(btn);
+    }
+    div.append(head);
+
+    const detail = document.createElement("div");
+    detail.className = "muted";
+    detail.textContent = c.connection
+      ? `connection ${c.connection.id} · expires ${c.connection.expires_at}` +
+        `${c.connection.expired ? " (EXPIRED)" : ""}` +
+        `${c.connection.is_service ? " · SERVICE" : ""}`
+      : "no connection stored";
+    div.append(detail);
+
+    const verified = document.createElement("div");
+    verified.className = "muted";
+    verified.textContent = `verified via ${o.admin_verification_method ?? "—"}` +
+      `${o.admin_verified_at ? ` at ${o.admin_verified_at}` : ""}`;
+    div.append(verified);
+
+    host.append(div);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+async function currentSession() {
+  const { data: { session } } = await supabase.auth.getSession();
+  return session;
+}
+
+function renderStatus(session) {
+  const signedIn = Boolean(session);
+  $("me").disabled = !signedIn || !activeOrgId;
+  $("disconnect").disabled = !signedIn || !activeOrgId;
+  $("signout").disabled = !signedIn;
+  $("link").disabled = !signedIn;
+
+  show("status", signedIn
     ? {
         build: BUILD,
         last_event: lastEvent,
@@ -167,24 +341,48 @@ function render(session) {
           : (hash.has("access_token") || hash.has("provider_token"))
             ? "#fragment (implicit)"
             : "none",
-        will_store_tokens: OAUTH_RETURN,
+        // The one-shot trap, made visible. If this is false and "Register this
+        // church" fails, the cause is a reload - not permissions.
+        provider_tokens_in_memory: Boolean(heldProviderTokens),
         signed_in_as: session.user.email,
         supabase_user_id: session.user.id,
+        supabase_identities: session.user.identities?.length ?? null,
+        active_organization_id: activeOrgId,
+        active_role: activeRole,
+        active_connection_id: activeConnectionId,
+        church_count: churches.length,
       }
     : { build: BUILD, state: "Signed out." });
 }
 
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
 supabase.auth.onAuthStateChange(async (event, session) => {
   lastEvent = event;
-  render(session);
+  renderStatus(session);
   if (!session) return;
+
+  showProviderTokens(session);
+
+  // Record the linking verdict BEFORE the normal join runs, so a later tenancy
+  // refusal cannot overwrite the evidence.
+  if (LINKING_BEFORE) reportLinkResult(session);
 
   // SIGNED_IN fires once, after the OAuth code exchange. INITIAL_SESSION fires
   // on every page load from the persisted session, which still carries the
-  // provider tokens - storing there too would re-upsert on every reload,
-  // spending two PCO API calls each time and resetting refreshed_at. Show the
-  // panel either way; only write on a genuine sign-in.
-  await captureProviderTokens(session, { store: OAUTH_RETURN });
+  // provider tokens - deciding there too would re-run the gate on every reload,
+  // spending PCO API calls each time. Show the panels either way; only act on a
+  // genuine return from Planning Center.
+  if (OAUTH_RETURN) {
+    await attemptJoin();
+  } else {
+    show("tenancy", `Skipped: not an OAuth return (oauth_return=false). ` +
+      `Tenancy is only decided on the redirect back from Planning Center.`);
+  }
+
+  await refreshChurches();
 });
 
 $("connect").onclick = () => supabase.auth.signInWithOAuth({
@@ -198,25 +396,145 @@ $("connect").onclick = () => supabase.auth.signInWithOAuth({
   },
 });
 
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
+
+$("register").onclick = async () => {
+  if (!heldProviderTokens) {
+    show("register-out",
+      "Provider tokens are gone - the page was reloaded since signing in. " +
+      "They exist only once, immediately after the OAuth return. Click " +
+      "Connect Planning Center again; it is a few seconds.");
+    return;
+  }
+  show("register-out", "Verifying Organization Administrator with Planning Center…");
+  try {
+    const res = await callFunctionRaw("org-register", heldProviderTokens);
+    // 403 and 409 bodies are shown verbatim - they are the evidence.
+    show("register-out", { http_status: res.status, ...res.body });
+    if (res.status === 200) {
+      heldProviderTokens = null;
+      setActiveOrg(res.body.organization.id);
+      $("register").disabled = true;
+      await refreshChurches();
+    }
+  } catch (err) {
+    show("register-out", `Error: ${err.message}`);
+  }
+};
+
+// ---------------------------------------------------------------------------
+// Experiment E-2: can one Supabase user hold two PCO identities?
+//
+// In PCO a Person is scoped to an organization, so the same human at two
+// churches very likely has two person ids - and `sub` is the person id.
+// Supabase keys identities on (provider, sub), so a plain second sign-in would
+// mint a second auth.users row and split the human in two.
+//
+// Reading the GoTrue source says linkIdentity keys its rejection on sub rather
+// than on provider, and that the PKCE exchange attaches provider tokens with no
+// branch for linking flows. Both are hypotheses. This button tests them.
+// ---------------------------------------------------------------------------
+
+$("link").onclick = async () => {
+  try {
+    const before = await callFunction("org-status");
+    const session = await currentSession();
+    sessionStorage.setItem("linking_before", JSON.stringify({
+      user_id: session.user.id,
+      identities: session.user.identities?.length ?? null,
+      church_count: before.churches.length,
+    }));
+    show("linking", {
+      phase: "redirecting",
+      note: "Pick the OTHER church at Planning Center.",
+      user_id: session.user.id,
+      identities_before: session.user.identities?.length ?? null,
+      churches_before: before.churches.length,
+    });
+    const { error } = await supabase.auth.linkIdentity({
+      provider: "custom:planning-center",
+      options: {
+        scopes: "openid people",
+        redirectTo: window.location.origin,
+        queryParams: { prompt: "select_account" },
+      },
+    });
+    if (error) {
+      sessionStorage.removeItem("linking_before");
+      // Expected when picking the SAME church again (experiment E-3), and when
+      // manual linking is disabled project-wide.
+      show("linking", { failed: true, error: error.message, code: error.code });
+      $("link-verdict").className = "bad";
+      $("link-verdict").textContent = "FAIL";
+    }
+  } catch (err) {
+    show("linking", `Error: ${err.message}`);
+  }
+};
+
+function reportLinkResult(session) {
+  const before = JSON.parse(LINKING_BEFORE);
+  const gotRefresh = Boolean(session.provider_refresh_token);
+  const sameUser = session.user.id === before.user_id;
+  const identitiesAfter = session.user.identities?.length ?? null;
+
+  // (b) is the make-or-break. Identities linking without provider tokens makes
+  // linking useless to us, and is the outcome the source reading says should
+  // not happen - which is exactly why it has to be observed.
+  const pass = sameUser && gotRefresh &&
+    (identitiesAfter === null || identitiesAfter > (before.identities ?? 0));
+
+  show("linking", {
+    same_supabase_user: sameUser,
+    identities_before: before.identities,
+    identities_after: identitiesAfter,
+    churches_before: before.church_count,
+    provider_token_returned: Boolean(session.provider_token),
+    provider_refresh_token_returned: gotRefresh,
+    verdict: !sameUser
+      ? "A SECOND auth.users row was created - identities did not link. " +
+        "Multi-church needs the self-hosted OAuth exchange."
+      : gotRefresh
+        ? "linkIdentity kept one user AND returned PCO tokens - the model holds."
+        : "Linked, but NO provider refresh token came back. Linking alone is " +
+          "useless to us; build the self-hosted exchange.",
+  });
+  $("link-verdict").className = pass ? "ok" : "bad";
+  $("link-verdict").textContent = pass ? "PASS" : "FAIL";
+}
+
+// ---------------------------------------------------------------------------
+
 $("me").onclick = async () => {
   show("result", "Calling…");
-  try { show("result", await callFunction("pco-me")); }
+  try { show("result", await callFunction("pco-me", { organization_id: activeOrgId })); }
   catch (err) { show("result", `Error: ${err.message}`); }
 };
 
 $("disconnect").onclick = async () => {
   show("result", "Revoking…");
-  try { show("result", await callFunction("pco-disconnect")); stored = false; }
-  catch (err) { show("result", `Error: ${err.message}`); }
+  try {
+    show("result", await callFunction("pco-disconnect", { organization_id: activeOrgId }));
+    await refreshChurches();
+  } catch (err) { show("result", `Error: ${err.message}`); }
 };
 
 $("signout").onclick = async () => {
   await supabase.auth.signOut();
-  stored = false;
+  heldProviderTokens = null;
+  churches = [];
+  activeRole = null;
+  activeConnectionId = null;
+  setActiveOrg(null);
   show("tokens", "Not signed in yet.");
-  show("capture", "Nothing captured yet.");
+  show("tenancy", "No decision yet.");
+  show("register-out", "—");
   show("result", "—");
+  $("churches").innerHTML = '<pre class="muted">—</pre>';
   $("verdict").textContent = "";
+  $("register").disabled = true;
 };
 </script>
 </body>
