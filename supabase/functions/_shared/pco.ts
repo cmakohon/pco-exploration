@@ -19,14 +19,19 @@ export const PCO_API_BASE = PCO_ISSUER;
 // skew and the latency of the call we are about to make.
 const EXPIRY_SKEW_SECONDS = 300;
 
-export const USER_AGENT = requireEnv("PCO_USER_AGENT");
-const CLIENT_ID = requireEnv("PCO_CLIENT_ID");
-const CLIENT_SECRET = requireEnv("PCO_CLIENT_SECRET");
+// Read lazily, never at module scope: a throw during module init kills the
+// whole worker with an opaque WORKER_ERROR and takes the CORS preflight down
+// with it. Reading on use turns a missing secret into a normal 500 with a
+// message that says which one.
+export const userAgent = () => requireEnv("PCO_USER_AGENT");
+const clientId = () => requireEnv("PCO_CLIENT_ID");
+const clientSecret = () => requireEnv("PCO_CLIENT_SECRET");
 
 function requireEnv(name: string): string {
   const value = Deno.env.get(name);
   if (!value) {
-    throw new Error(
+    throw new HttpError(
+      500,
       `Missing secret ${name}. Set it with: supabase secrets set ${name}=...`,
     );
   }
@@ -82,7 +87,7 @@ export async function fetchUserInfo(accessToken: string) {
   const res = await fetch(PCO_USERINFO_URL, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "User-Agent": USER_AGENT,
+      "User-Agent": userAgent(),
     },
   });
   if (!res.ok) {
@@ -105,11 +110,11 @@ export async function fetchUserInfo(accessToken: string) {
 export async function introspect(token: string) {
   const res = await fetch(PCO_INTROSPECT_URL, {
     method: "POST",
-    headers: { "User-Agent": USER_AGENT },
+    headers: { "User-Agent": userAgent() },
     body: formBody({
       token,
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
+      client_id: clientId(),
+      client_secret: clientSecret(),
     }),
   });
   if (!res.ok) {
@@ -132,12 +137,12 @@ export async function introspect(token: string) {
 export async function refreshAccessToken(refreshToken: string) {
   const res = await fetch(PCO_TOKEN_URL, {
     method: "POST",
-    headers: { "User-Agent": USER_AGENT },
+    headers: { "User-Agent": userAgent() },
     body: formBody({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
+      client_id: clientId(),
+      client_secret: clientSecret(),
     }),
   });
   if (!res.ok) {
@@ -161,12 +166,12 @@ export async function revokeToken(
 ) {
   await fetch(PCO_REVOKE_URL, {
     method: "POST",
-    headers: { "User-Agent": USER_AGENT },
+    headers: { "User-Agent": userAgent() },
     body: formBody({
       token,
       token_type_hint: hint,
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
+      client_id: clientId(),
+      client_secret: clientSecret(),
     }),
   });
 }
@@ -226,7 +231,7 @@ export async function pcoFetch(
     headers: {
       ...init.headers,
       Authorization: `Bearer ${accessToken}`,
-      "User-Agent": USER_AGENT, // omit this and PCO answers 403
+      "User-Agent": userAgent(), // omit this and PCO answers 403
     },
   });
 
