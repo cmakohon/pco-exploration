@@ -128,6 +128,14 @@ let heldProviderTokens = null;
 // are not an administrator of, for instance. Cleared on sign-out.
 let lastCapturedTokens = null;
 
+// onAuthStateChange fires more than once per page load (INITIAL_SESSION, then
+// SIGNED_IN, and again on a token refresh), and OAUTH_RETURN stays true for the
+// lifetime of the page. Without this latch the tenancy decision is re-made on
+// every event - three identical PCO round trips per sign-in, and three
+// duplicate rows in tenancy_events. This is snag 4.3 in a new costume: v5
+// guarded it with its `stored` flag and the rewrite dropped it.
+let tenancyDecided = false;
+
 let lastEvent = null;
 let activeOrgId = localStorage.getItem("pco_active_org") || null;
 let activeRole = null;
@@ -191,6 +199,9 @@ function showProviderTokens(session) {
 // ---------------------------------------------------------------------------
 
 async function attemptJoin() {
+  if (tenancyDecided) return;
+  tenancyDecided = true;
+
   if (!heldProviderTokens) {
     show("tenancy", "Skipped: Supabase did not supply both provider tokens.");
     return;
@@ -539,6 +550,7 @@ $("disconnect").onclick = async () => {
 $("signout").onclick = async () => {
   await supabase.auth.signOut();
   heldProviderTokens = null;
+  tenancyDecided = false;
   churches = [];
   activeRole = null;
   activeConnectionId = null;
