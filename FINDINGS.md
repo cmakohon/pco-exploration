@@ -361,8 +361,9 @@ goes **200 → 401** against `/people/v2/me`.
   last use, so lazy refresh cannot cover it and an idle connection strands with
   no signal. Add a weekly `pg_cron` + `pg_net` keepalive (both available on free
   tier) before real churches depend on this.
-- **Single organization, single user.** Multi-org behavior, org switching, and
-  users belonging to several churches are all unexercised.
+- ~~**Single organization, single user.**~~ Now exercised - see section 8. Two
+  churches, two roles, one account. Webhook-driven org switching is still
+  untested.
 - **No webhooks, no rate-limit handling.** PCO publishes rate limits; nothing here
   backs off or retries.
 - **Tokens are decryptable by anything holding the `service_role` key.** Vault
@@ -389,3 +390,153 @@ goes **200 → 401** against `/people/v2/me`.
    there and all of them were earned.
 6. **Port the diagnostic panel idea**, not the page. Being able to see which
    build is running and what the auth layer decided is worth more than it costs.
+
+---
+
+## 8. Multi-tenancy: churches as tenants
+
+Added by migration `0003`. The model is **(user, organization)**, not user: a
+person may belong to several churches, and a church must be registered by one of
+its Organization Administrators before its members may link.
+
+Verified live against two real PCO organizations - Hope City Church Charlotte
+(where the tester is an ordinary member) and Charlotte Church (where they are an
+Organization Administrator).
+
+### 8.1 The admin gate
+
+**Assert on `data.attributes.site_administrator` from `/people/v2/me`. Nothing
+else.** PCO's UI calls the role "Organization Administrator"; the API kept the
+legacy name. There is no `organization_administrator` field - looking for one is
+a dead end.
+
+Both poles observed, which is what makes it a gate rather than a formality:
+
+| | Hope City (member) | Charlotte Church (admin) |
+|---|---|---|
+| `site_administrator` | `false` | `true` |
+| `people_permissions` | `null` | `"Manager"` |
+| `accounting_administrator` | `false` | `true` |
+| `directory_status` | `"no_access"` | - |
+
+- `site_administrator` **is present in the default payload** (`source: "default"`),
+  so the `?fields[Person]=...` retry is a fallback, not the normal path.
+- It reads `false` for a non-admin rather than being **absent**. A field that is
+  never `false` would not be a gate at all - test both poles or you have
+  verified nothing.
+- **`people_permissions` came back `null`**, not one of the documented
+  `Manager`/`Editor`/`Viewer`/`No access` strings. Do not assert on it. It is
+  also People-app scoped rather than org-wide: a People Manager is a volunteer
+  database admin, not the person who signs a church up for a vendor.
+- Confirmed `?fields`-gated, i.e. absent from the default payload:
+  `mfa_configured`, `directory_shared_info`, `stripe_account_identifier`,
+  `stripe_customer_identifier`.
+
+Ambiguity **fails closed**: a `null` signal returns `403 admin_signal_unavailable`
+and logs the full attribute list PCO actually returned, so a wrong field name is
+a thirty-second fix rather than an hour.
+
+### 8.2 One human, two churches - Supabase links them for you
+
+This was the open risk that could have invalidated the whole model, and the
+answer is better than expected.
+
+**PCO's `sub` is the Person id, and a Person is scoped to an organization**, so
+the same human has a different `sub` per church - confirmed: `152662737` at Hope
+City, `202345396` at Charlotte Church.
+
+**Supabase attached both to a single `auth.users` row anyway, on a plain
+sign-in.** No `linkIdentity()` call was needed or made:
+
+```
+819fc9ed-...  custom:planning-center  sub=152662737  14:06:33
+819fc9ed-...  custom:planning-center  sub=202345396  15:37:04
+```
+
+Two consequences:
+
+- **GoTrue permits two identities from the same provider on one user**, provided
+  the `sub` values differ. `auth.identities` is unique on `(provider,
+  provider_id)`, not `(user_id, provider)`. The widespread "you cannot link the
+  same provider twice" answer is describing the same-`sub` case and does not
+  apply.
+- **The link happened because the email matched.** PCO asserts no
+  `email_verified` claim (4.9) and Confirm-email is off project-wide, so two
+  identities were merged into one account on the strength of an unverified email
+  string. Convenient here; load-bearing in production. This is 4.9's
+  account-squatting risk in a new costume and it should be revisited before real
+  churches depend on it.
+
+**`auth.identities.identity_data` does NOT carry the org claims** - `organization_id`
+and `organization_name` are both null there. `/oauth/userinfo` is the only
+source. There is no cheaper path; do not try to optimize it away.
+
+### 8.3 Authorization belongs inside the decryption query
+
+`pco_connection_get` joins `memberships` in the same statement that joins
+`vault.decrypted_secrets`. A caller who is not an active member of an active
+church gets **zero rows instead of a token**.
+
+Verified: asking for a church the user does not belong to returns `[]` **even
+with the `service_role` key**. The guarantee lives in SQL, not in TypeScript, so
+a forgotten check in an Edge Function cannot leak. The `requireMembership()` call
+in the handlers is defence in depth and a clearer error - not the boundary.
+
+### 8.4 Permissions change and nothing tells you
+
+Demoting the tester from `owner` to `member` - to match what PCO actually says -
+immediately broke the church's background identity, because
+`pco_connection_get_service` joins `role in ('owner','admin')`:
+
+| | |
+|---|---|
+| `pco_connection_get` (own connection) | still resolves |
+| `pco_connection_get_service` | **0 rows - background work dead** |
+| `pco_connections.is_service` | still `true` |
+| `organizations.status` | still `active` |
+
+**Nothing detected the inconsistency.** PCO never notifies you when a person's
+permissions change, and the service connection carries one human's permissions.
+Fold an admin re-check into the `pg_cron` keepalive (§6) rather than trusting the
+claim made at registration time.
+
+### 8.5 Snags
+
+**Every connection RPC signature changed, and Postgres overloads by signature.**
+`CREATE OR REPLACE` with new parameters leaves the old
+`pco_connection_get(uuid)` alive and callable forever - a function answering
+"this user's connection" with no church named is exactly the footgun the
+migration exists to remove. Drop the old signatures explicitly, and repeat the
+`revoke ... from public, anon, authenticated` loop (4.6) for every new one, since
+dropping resets grants.
+
+**Testing the revoke with the wrong arguments passes for the wrong reason.**
+Calling an RPC with `{}` returns `PGRST202` ("no matching signature") without
+ever reaching the permission check. Call with the **real argument names** and
+require `42501`. All seven functions verified this way.
+
+**`onAuthStateChange` fires several times per sign-in** - `INITIAL_SESSION`, then
+`SIGNED_IN`, then again on a token refresh - and the OAuth-return flag stays true
+for the life of the page. Without a latch the tenancy decision is re-made on
+every event: three identical `tenancy_events` rows and three PCO round trips per
+sign-in. This is 4.3 wearing a different hat, and the rewrite reintroduced it
+after v5 had already fixed it. The UI looked correct throughout; only the rows
+showed it.
+
+**The one-shot provider tokens have to survive the tenancy decision.** The gate
+must refuse to store until the church is registered, but registration needs a
+token to ask PCO who you are. Storing "pending" tokens defeats the gate, so the
+tokens stay in the browser's memory across that round trip. A reload destroys
+them and the resulting failure looks exactly like a permissions bug - which is
+why the Status panel reports `provider_tokens_in_memory`.
+
+### 8.6 Still not tested
+
+- The orphan reap itself. The guard was verified (a user who already belongs to
+  one church is **not** deleted when refused at another), but the deletion path
+  needs a brand-new account at an unregistered church who is *not* an admin -
+  and an admin is never reaped, by design.
+- Rotation isolation between two connections; service-connection handover on
+  disconnect; the non-admin registration refusal.
+- Hope City remains `migrated_unverified`: it was claimed by the backfill's
+  construction and no one who can prove admin rights there has registered it.
