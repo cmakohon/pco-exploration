@@ -436,6 +436,23 @@ Ambiguity **fails closed**: a `null` signal returns `403 admin_signal_unavailabl
 and logs the full attribute list PCO actually returned, so a wrong field name is
 a thirty-second fix rather than an hour.
 
+Verified end to end: an ordinary member forcing `org-register` gets
+`403 not_organization_administrator` with `site_administrator: false` recorded
+as an actual boolean, and nothing is written to `organizations`.
+
+**`GET /people/v2` is NOT usable as an org-identity cross-check.** Reading the
+Organization vertex needs permissions an ordinary person does not have, and PCO
+says so plainly:
+
+```
+"User with id 152662737 cannot read
+ AppGraph::V2026_06_04::Vertices::OrganizationVertex with id 98537"
+```
+
+So the endpoint is unavailable for precisely the users the gate exists to
+reject. `/people/v2/me` works for everyone and is the one to rely on. Treat a
+`/people/v2` refusal as missing evidence, never as a failure - see 8.5.
+
 ### 8.2 One human, two churches - Supabase links them for you
 
 This was the open risk that could have invalidated the whole model, and the
@@ -523,6 +540,22 @@ sign-in. This is 4.3 wearing a different hat, and the rewrite reintroduced it
 after v5 had already fixed it. The UI looked correct throughout; only the rows
 showed it.
 
+**Order the checks so the cheapest, most-permitted one runs first.** The
+original `org-register` cross-checked the organization id before checking admin
+rights. That cross-check reads `GET /people/v2`, which a member is forbidden to
+do, so a non-admin got a raw PCO 403 instead of
+`not_organization_administrator` - and no `tenancy_events` row at all, because
+the throw beat the logging. The happy path never showed it: an Organization
+Administrator *can* read the vertex, so registering a church you administer
+worked perfectly throughout. Only the case the gate exists to reject exposed it.
+
+The rule that falls out: **hard-fail on contradictory evidence, never on
+missing evidence.** A mismatch between `userinfo` and `/people/v2` is still a
+409. A refusal to answer is recorded and moves on. And note the cross-check was
+always belt-and-braces - the org id is derived from the token via
+`/oauth/userinfo` and never comes from the request body, so there was no
+client-supplied value to distrust in the first place.
+
 **The one-shot provider tokens have to survive the tenancy decision.** The gate
 must refuse to store until the church is registered, but registration needs a
 token to ask PCO who you are. Storing "pending" tokens defeats the gate, so the
@@ -536,7 +569,7 @@ why the Status panel reports `provider_tokens_in_memory`.
   one church is **not** deleted when refused at another), but the deletion path
   needs a brand-new account at an unregistered church who is *not* an admin -
   and an admin is never reaped, by design.
-- Rotation isolation between two connections; service-connection handover on
-  disconnect; the non-admin registration refusal.
+- Rotation isolation between two connections, and service-connection handover
+  on disconnect.
 - Hope City remains `migrated_unverified`: it was claimed by the backfill's
   construction and no one who can prove admin rights there has registered it.
