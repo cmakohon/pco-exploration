@@ -174,6 +174,32 @@ Note that OAuth servers commonly withhold a refresh token when *re*-authorizing
 an already-approved app. Revoke the app in your PCO account before concluding
 the feature is broken.
 
+## Gotchas found in practice
+
+**Supabase sends its own confirmation email on first sign-in.** PCO's discovery
+document advertises exactly these claims:
+
+```
+iss, sub, aud, exp, iat, name, email, organization_id, organization_name
+```
+
+No `email_verified`. Supabase will not treat a provider-supplied email as
+verified unless the provider asserts it, so it falls back to emailing its own
+confirmation link — which must be clicked before the session is usable.
+
+For this spike that is a one-time annoyance. For a real multi-church product it
+is a decision to make deliberately: every user would authenticate with Planning
+Center and *then* be asked to confirm an email address Planning Center already
+verified. Options, roughly in order of preference:
+
+1. Turn off **Confirm email** under Authentication → Sign In / Providers →
+   Email. Reasonable here because the email arrives from PCO's OIDC token rather
+   than from user input, so there is no address-squatting risk to defend against.
+2. Leave it on and design the extra step into the onboarding flow.
+3. Ask Planning Center to add `email_verified` to their claims.
+
+Worth settling before the flow is in front of churches, not after.
+
 ## Security notes
 
 - `pco_connections` has RLS enabled with **zero policies**, which denies `anon`
