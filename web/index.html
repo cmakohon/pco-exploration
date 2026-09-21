@@ -123,6 +123,11 @@ const fnUrl = (name) => `${cfg.SUPABASE_URL}/functions/v1/${name}`;
 // provider_tokens_in_memory - without it, the cause is invisible.
 let heldProviderTokens = null;
 
+// Kept past the point heldProviderTokens is cleared, purely so the negative
+// tests can force calls the UI deliberately disables - registering a church you
+// are not an administrator of, for instance. Cleared on sign-out.
+let lastCapturedTokens = null;
+
 let lastEvent = null;
 let activeOrgId = localStorage.getItem("pco_active_org") || null;
 let activeRole = null;
@@ -176,6 +181,7 @@ function showProviderTokens(session) {
       provider_token: session.provider_token,
       provider_refresh_token: session.provider_refresh_token,
     };
+    lastCapturedTokens = { ...heldProviderTokens };
   }
   return hasAccess && hasRefresh;
 }
@@ -507,6 +513,15 @@ function reportLinkResult(session) {
 
 // ---------------------------------------------------------------------------
 
+// Test affordance, not product surface. The negative tests need to reach
+// endpoints the buttons correctly refuse to offer.
+window.__pco = {
+  call: callFunctionRaw,
+  tokens: () => heldProviderTokens ?? lastCapturedTokens,
+  churches: () => churches,
+  supabase,
+};
+
 $("me").onclick = async () => {
   show("result", "Calling…");
   try { show("result", await callFunction("pco-me", { organization_id: activeOrgId })); }
@@ -528,6 +543,7 @@ $("signout").onclick = async () => {
   activeRole = null;
   activeConnectionId = null;
   setActiveOrg(null);
+  lastCapturedTokens = null;
   show("tokens", "Not signed in yet.");
   show("tenancy", "No decision yet.");
   show("register-out", "—");
