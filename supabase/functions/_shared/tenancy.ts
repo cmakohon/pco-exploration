@@ -102,15 +102,42 @@ export function judgeOrgAdmin(sig: AdminSignal): AdminVerdict {
   return { ok: false, reason: "admin_signal_unavailable" };
 }
 
+export interface OrgCrossCheck {
+  checked: boolean;
+  api_org_id: string | null;
+  note?: string;
+}
+
 /**
- * Never trust a client-supplied organization id. Derive it from the token two
- * ways and require agreement before claiming a church on its behalf.
+ * Cross-check the organization id the token claims against what the People API
+ * root reports.
  *
- * /people/v2 is the People API root, which IS the Organization resource for
- * whichever org the token belongs to.
+ * Non-fatal when PCO refuses to answer. Verified live: an ordinary member gets
+ * a bare 403 - "User with id 152662737 cannot read ... OrganizationVertex with
+ * id 98537" - because reading the Organization vertex needs permissions a
+ * regular person does not have. That is absence of evidence, not contradiction,
+ * and failing on it would reject the very users the admin gate exists to
+ * reject, with the wrong error.
+ *
+ * A genuine MISMATCH is still fatal. We hard-fail only on contradictory
+ * evidence, never on missing evidence.
+ *
+ * Note the org id never comes from the request body in the first place - it is
+ * derived from the token via /oauth/userinfo. This is belt-and-braces on top of
+ * that, not the primary defence.
  */
-export async function assertOrgMatches(accessToken: string, claimedOrgId: string) {
-  const doc = await pcoFetchWithToken(accessToken, "/people/v2");
+export async function assertOrgMatches(
+  accessToken: string,
+  claimedOrgId: string,
+): Promise<OrgCrossCheck> {
+  let doc;
+  try {
+    doc = await pcoFetchWithToken(accessToken, "/people/v2");
+  } catch (err) {
+    const note = (err instanceof Error ? err.message : String(err)).slice(0, 300);
+    return { checked: false, api_org_id: null, note };
+  }
+
   const data = doc?.data;
   const apiOrgId = Array.isArray(data) ? data[0]?.id : data?.id;
 
@@ -121,7 +148,10 @@ export async function assertOrgMatches(accessToken: string, claimedOrgId: string
         `/people/v2 said ${apiOrgId}`,
     );
   }
-  return apiOrgId ? String(apiOrgId) : null;
+  return {
+    checked: Boolean(apiOrgId),
+    api_org_id: apiOrgId ? String(apiOrgId) : null,
+  };
 }
 
 // ---------------------------------------------------------------------------

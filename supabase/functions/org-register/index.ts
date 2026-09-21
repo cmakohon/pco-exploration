@@ -62,10 +62,11 @@ Deno.serve(handler(async (req) => {
     throw new HttpError(409, "PCO did not return an organization_id for this token");
   }
 
-  // The org id comes only from the token, never from the request body - a
-  // client-supplied org id would let anyone claim any church.
-  await assertOrgMatches(provider_token, pcoOrgId);
-
+  // The admin check runs FIRST, and deliberately so. The org cross-check reads
+  // GET /people/v2, which an ordinary member is forbidden to do - running it
+  // first meant a non-admin got a raw PCO 403 instead of a clean
+  // not_organization_administrator, and no tenancy_events row at all, because
+  // the throw beat the logging.
   const signal = await fetchAdminSignal(provider_token);
   const verdict = judgeOrgAdmin(signal);
 
@@ -116,6 +117,11 @@ Deno.serve(handler(async (req) => {
     );
   }
 
+  // Only now, having established this caller is an administrator and therefore
+  // entitled to read the Organization vertex. A mismatch still fails; a refusal
+  // to answer is recorded and moves on.
+  const crossCheck = await assertOrgMatches(provider_token, pcoOrgId);
+
   const orgId = result.organization_id as string;
   const expiresAt = expiresAtFrom(info);
 
@@ -156,7 +162,7 @@ Deno.serve(handler(async (req) => {
     pco_organization_name: pcoOrgName,
     decision: "registered",
     reason: verdict.method,
-    detail: { organization_id: orgId, connection_id: connectionId, signal },
+    detail: { organization_id: orgId, connection_id: connectionId, signal, crossCheck },
   });
 
   return json({
@@ -176,6 +182,7 @@ Deno.serve(handler(async (req) => {
     // Safe to echo: it carries no tokens, and seeing exactly what PCO said is
     // the entire point of the diagnostic panel.
     admin_signal: signal,
+    org_cross_check: crossCheck,
     expires_at: expiresAt,
   });
 }));
