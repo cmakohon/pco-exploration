@@ -81,7 +81,7 @@ async function callFunction(name, body) {
 // THE GO/NO-GO. provider_token and provider_refresh_token are present in the
 // session only immediately after sign-in and vanish on the next session
 // refresh, so they have to be captured here and handed to the server at once.
-async function captureProviderTokens(session) {
+async function captureProviderTokens(session, { store }) {
   const hasAccess = Boolean(session?.provider_token);
   const hasRefresh = Boolean(session?.provider_refresh_token);
 
@@ -98,7 +98,8 @@ async function captureProviderTokens(session) {
   $("verdict").className = hasRefresh ? "ok" : "bad";
   $("verdict").textContent = hasRefresh ? "PASS" : (hasAccess ? "FAIL" : "");
 
-  if (!hasAccess || !hasRefresh || stored) return;
+  // Display only - storing is the caller's decision.
+  if (!store || !hasAccess || !hasRefresh || stored) return;
 
   try {
     const res = await callFunction("pco-store-tokens", {
@@ -123,9 +124,14 @@ function render(session) {
 
 supabase.auth.onAuthStateChange(async (event, session) => {
   render(session);
-  if (event === "SIGNED_IN" || event === "INITIAL_SESSION") {
-    if (session) await captureProviderTokens(session);
-  }
+  if (!session) return;
+
+  // SIGNED_IN fires once, after the OAuth code exchange. INITIAL_SESSION fires
+  // on every page load from the persisted session, which still carries the
+  // provider tokens - storing there too would re-upsert on every reload,
+  // spending two PCO API calls each time and resetting refreshed_at. Show the
+  // panel either way; only write on a genuine sign-in.
+  await captureProviderTokens(session, { store: event === "SIGNED_IN" });
 });
 
 $("connect").onclick = () => supabase.auth.signInWithOAuth({
