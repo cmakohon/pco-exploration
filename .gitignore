@@ -1,0 +1,7 @@
+.env
+.env.local
+web/config.js
+node_modules/
+.DS_Store
+supabase/.branches/
+supabase/.temp/

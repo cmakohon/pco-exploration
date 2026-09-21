@@ -1,0 +1,39 @@
+project_id = "pco-exploration"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 17
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = true
+site_url = "http://localhost:3000"
+additional_redirect_urls = ["http://localhost:3000", "http://127.0.0.1:3000"]
+# NOTE: this [auth] block configures LOCAL dev only. The hosted project's
+# Site URL and Redirect URLs are set in the dashboard (see README step 3).
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+
+# All three functions authenticate the caller themselves, via requireUser() in
+# _shared/pco.ts. verify_jwt is off because the platform's built-in check runs
+# before the handler and rejects the CORS preflight, which carries no
+# Authorization header. Manual verification is equivalent security with a
+# working preflight.
+[functions.pco-store-tokens]
+verify_jwt = false
+
+[functions.pco-me]
+verify_jwt = false
+
+[functions.pco-disconnect]
+verify_jwt = false

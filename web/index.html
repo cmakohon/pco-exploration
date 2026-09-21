@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Planning Center OAuth spike</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 ui-sans-serif, system-ui, sans-serif; max-width: 52rem;
+         margin: 3rem auto; padding: 0 1.5rem; }
+  h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+  p.sub { color: #888; margin-top: 0; }
+  button { font: inherit; padding: .5rem .9rem; margin: 0 .4rem .6rem 0;
+           border-radius: .4rem; border: 1px solid #8884; cursor: pointer;
+           background: #8881; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  pre { background: #8881; padding: .9rem; border-radius: .5rem;
+        overflow-x: auto; font-size: 13px; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em;
+       color: #888; margin: 1.6rem 0 .4rem; }
+  .ok { color: #2e9e5b; } .bad { color: #d4453c; }
+</style>
+</head>
+<body>
+
+<h1>Planning Center OAuth spike</h1>
+<p class="sub">Proves the confidential authorization-code flow end to end.</p>
+
+<div>
+  <button id="connect">Connect Planning Center</button>
+  <button id="me" disabled>Call /people/v2/me</button>
+  <button id="disconnect" disabled>Disconnect</button>
+  <button id="signout" disabled>Sign out</button>
+</div>
+
+<h2>Status</h2>
+<pre id="status">Loading…</pre>
+
+<h2>Provider token check <span id="verdict"></span></h2>
+<pre id="tokens">Not signed in yet.</pre>
+
+<h2>Result</h2>
+<pre id="result">—</pre>
+
+<script src="config.js" onerror="window.__noConfig = true"></script>
+<script type="module">
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+const cfg = window.PCO_CONFIG;
+const $ = (id) => document.getElementById(id);
+const show = (id, value) =>
+  $(id).textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+
+if (!cfg?.SUPABASE_URL || !cfg?.SUPABASE_ANON_KEY) {
+  show("status", "Missing config. Copy web/config.example.js to web/config.js and fill it in.");
+  throw new Error("missing config");
+}
+
+const supabase = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+const fnUrl = (name) => `${cfg.SUPABASE_URL}/functions/v1/${name}`;
+
+let stored = false;
+
+async function callFunction(name, body) {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) throw new Error("No Supabase session");
+  const res = await fetch(fnUrl(name), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session.access_token}`,
+      apikey: cfg.SUPABASE_ANON_KEY,
+    },
+    body: JSON.stringify(body ?? {}),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error ?? res.statusText);
+  return json;
+}
+
+// THE GO/NO-GO. provider_token and provider_refresh_token are present in the
+// session only immediately after sign-in and vanish on the next session
+// refresh, so they have to be captured here and handed to the server at once.
+async function captureProviderTokens(session) {
+  const hasAccess = Boolean(session?.provider_token);
+  const hasRefresh = Boolean(session?.provider_refresh_token);
+
+  show("tokens", {
+    provider_token: hasAccess ? `present (${session.provider_token.length} chars)` : null,
+    provider_refresh_token: hasRefresh
+      ? `present (${session.provider_refresh_token.length} chars)`
+      : null,
+    note: hasRefresh
+      ? "Supabase passed PCO's refresh token through. Architecture holds."
+      : "No refresh token. If re-authorizing an already-approved app, revoke it "
+        + "in your PCO account and retry; otherwise fall back to the self-hosted flow.",
+  });
+  $("verdict").className = hasRefresh ? "ok" : "bad";
+  $("verdict").textContent = hasRefresh ? "PASS" : (hasAccess ? "FAIL" : "");
+
+  if (!hasAccess || !hasRefresh || stored) return;
+
+  try {
+    const res = await callFunction("pco-store-tokens", {
+      provider_token: session.provider_token,
+      provider_refresh_token: session.provider_refresh_token,
+    });
+    stored = true;
+    show("result", res);
+  } catch (err) {
+    show("result", `Store failed: ${err.message}`);
+  }
+}
+
+function render(session) {
+  $("me").disabled = !session;
+  $("disconnect").disabled = !session;
+  $("signout").disabled = !session;
+  show("status", session
+    ? { signed_in_as: session.user.email, supabase_user_id: session.user.id }
+    : "Signed out.");
+}
+
+supabase.auth.onAuthStateChange(async (event, session) => {
+  render(session);
+  if (event === "SIGNED_IN" || event === "INITIAL_SESSION") {
+    if (session) await captureProviderTokens(session);
+  }
+});
+
+$("connect").onclick = () => supabase.auth.signInWithOAuth({
+  provider: "custom:planning-center",
+  options: {
+    scopes: "openid people",
+    redirectTo: window.location.origin,
+    // PCO recommends select_account so the user can confirm or switch which
+    // account (and therefore which church) they are connecting.
+    queryParams: { prompt: "select_account" },
+  },
+});
+
+$("me").onclick = async () => {
+  show("result", "Calling…");
+  try { show("result", await callFunction("pco-me")); }
+  catch (err) { show("result", `Error: ${err.message}`); }
+};
+
+$("disconnect").onclick = async () => {
+  show("result", "Revoking…");
+  try { show("result", await callFunction("pco-disconnect")); stored = false; }
+  catch (err) { show("result", `Error: ${err.message}`); }
+};
+
+$("signout").onclick = async () => {
+  await supabase.auth.signOut();
+  stored = false;
+  show("tokens", "Not signed in yet.");
+  show("result", "—");
+  $("verdict").textContent = "";
+};
+</script>
+</body>
+</html>
