@@ -89,12 +89,27 @@ session.provider_token / provider_refresh_token   (once, never stored by Supabas
 |---|---|
 | `supabase/migrations/0001_pco_connections.sql` | Token table, RLS-sealed to service_role |
 | `supabase/migrations/0002_tokens_into_vault.sql` | Tokens into Vault + the SECURITY DEFINER RPCs |
-| `supabase/functions/_shared/pco.ts` | Endpoints, refresh, rotation-persisting `pcoFetch` |
+| `supabase/migrations/0003_multi_tenant.sql` | Churches as tenants, memberships, service connections |
+| `supabase/migrations/0004_unbrick_degraded_orgs.sql` | A degraded church must not become unjoinable (§ 8.7) |
+| `supabase/functions/_shared/pco.ts` | Endpoints, refresh, rotation-persisting `pcoFetch`, `pcoProbe*` |
 | `supabase/functions/_shared/http.ts` | CORS preflight + error-to-JSON |
-| `supabase/functions/pco-store-tokens/` | Captures the one-shot provider tokens |
+| `supabase/functions/_shared/tenancy.ts` | The admin gate, membership, audit, orphan reaping |
+| `supabase/functions/pco-store-tokens/` | The tenancy gate and the one-shot token capture it guards |
 | `supabase/functions/pco-me/` | Proves stored credentials work, surfaces rotation |
 | `supabase/functions/pco-disconnect/` | Revokes at PCO and deletes the row |
-| `web/index.html` | Connect button, go/no-go panel, result dump |
+| `supabase/functions/org-register/` | Claims a church, Organization Administrators only |
+| `supabase/functions/org-status/` | Which churches this user has, and switching between them |
+| `web/index.html` | Connect button, go/no-go panel, per-church probe buttons |
+
+Three read-only probes, none of which write anything. Each one exists because a
+refusal from PCO is the finding rather than the failure, so every outcome is
+recorded instead of thrown:
+
+| Probe | Question | Section |
+|---|---|---|
+| `pco-campuses/` | What Planning Center says about campuses, and to whom | § 9 |
+| `pco-groups/` | What Groups tells a member that People will not | § 10 |
+| `pco-calendar/` | Why a granted scope is not access | § 11 |
 
 ## Setup
 
@@ -117,9 +132,21 @@ Providers → Custom Providers → New Provider:
 | Provider ID | `custom:planning-center` |
 | Issuer | `https://api.planningcenteronline.com` |
 | Client ID / Secret | from step 2 |
-| Scopes | `openid people` |
+| Scopes | `openid people groups calendar` |
 
 Confirm the read-only Callback URL matches what you registered.
+
+> **This field is a default, not a ceiling and not an override.** supabase-js
+> sends whatever `options.scopes` says and that wins, so the value that actually
+> reaches Planning Center is `PCO_SCOPES` in `web/index.html`. Widen this field
+> alone and nothing changes — *silently*, because PCO issues a token for exactly
+> what was asked and every call to the missing product then returns a 401 that
+> reads like a permissions problem. Keep the two in sync and change the constant.
+> [FINDINGS § 10.9](FINDINGS.md).
+>
+> Widening the scope does not touch tokens already issued. An existing
+> connection keeps its grant until the user reconnects — no disconnect needed,
+> `pco_connection_upsert` takes the scope from introspection.
 
 Then, still in the dashboard, go to **Authentication → URL Configuration** and add
 `http://localhost:3000` to **Redirect URLs**. Without it the `redirectTo` in
@@ -239,5 +266,13 @@ Kept here only so they are impossible to miss:
 
 ## Deliberately out of scope
 
-Multi-org handling, webhooks, rate-limit backoff, and any
-actual product feature.
+Webhooks, rate-limit backoff, any write to Planning Center, and any actual
+product feature.
+
+Multi-org handling *was* out of scope and no longer is — churches are tenants,
+one human may belong to several, and the admin gate decides who may claim one.
+See [FINDINGS § 8](FINDINGS.md).
+
+Rate-limit backoff is the one that is starting to matter: the probes issue 9,
+17 and 31 PCO requests per invocation respectively, no `429` has been seen yet,
+and nothing would back off if one arrived.
