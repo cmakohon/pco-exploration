@@ -49,3 +49,6 @@ verify_jwt = false
 
 [functions.pco-groups]
 verify_jwt = false
+
+[functions.pco-calendar]
+verify_jwt = false

@@ -60,6 +60,9 @@ Organization Administrators before its members can link.</p>
 <h2>Groups</h2>
 <pre id="groups">—</pre>
 
+<h2>Calendar</h2>
+<pre id="calendar">—</pre>
+
 <h2>Registration</h2>
 <pre id="register-out">—</pre>
 
@@ -134,7 +137,7 @@ const fnUrl = (name) => `${cfg.SUPABASE_URL}/functions/v1/${name}`;
 //
 // Widening it does not touch tokens already issued. An existing connection
 // keeps its old grant until the user disconnects and reconnects.
-const PCO_SCOPES = "openid people groups";
+const PCO_SCOPES = "openid people groups calendar";
 
 // THE ONE-SHOT TRAP. provider_token and provider_refresh_token exist in the
 // session only immediately after sign-in. Registration needs them AFTER
@@ -363,6 +366,19 @@ function renderChurches() {
       show("groups", { http_status: res.status, ...res.body });
     };
     head.append(groupsBtn);
+
+    const calBtn = document.createElement("button");
+    calBtn.className = "small";
+    calBtn.textContent = "Calendar";
+    calBtn.onclick = async () => {
+      show("calendar", `Asking Planning Center about the calendar at ${o.name}…`);
+      // Raw, like the other two: the refusals are the finding. This one also
+      // runs an 18-path sweep by default - pass {sweep: false} through
+      // __pco.call to skip it.
+      const res = await callFunctionRaw("pco-calendar", { organization_id: o.id });
+      show("calendar", { http_status: res.status, ...res.body });
+    };
+    head.append(calBtn);
 
     div.append(head);
 

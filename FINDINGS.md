@@ -935,6 +935,12 @@ answered by granting that scope.** Fifteen requests produced one bit of
 information. Do not try to discover the surface; grant the scope and look, or
 leave the question open and say so.
 
+> **Extended by 11.2.** Granting the scope answers the question but does not
+> guarantee the answer is yes. There is a third refusal below this one - a
+> granted, live, introspected scope that PCO still refuses with a *different*
+> 401 (11.1). A scope is a ceiling on what the app may ask for, not a statement
+> of what this person may read.
+
 Run it with the console escape hatch:
 `__pco.call("pco-campuses", {organization_id, sweep: true})`.
 
@@ -1463,3 +1469,297 @@ Ranked by how much the answer changes the design.
 - **Writes of any kind.** Nothing in this spike has ever PATCHed or POSTed to
   PCO. Whether a member token can join a group, or a leader can add a member,
   is entirely unknown.
+
+---
+
+## 11. Calendar: a third kind of no
+
+Added by `pco-calendar`. Same rules as the two probes before it, with one
+change: the sweep runs **by default**. 9.7 cuts both ways - outside a scope
+every path returns an identical 401 and a sweep is worthless, but inside the
+scope a 404 is finally a real answer. Calendar was unmapped and this was the
+cheap chance to map it.
+
+Verified live against Hope City Church Charlotte on an ordinary member's token
+carrying `openid people groups calendar`. **Thirty-one requests to
+`/calendar/v2`. Thirty-one 401s.** `/people/v2/me` answered `200` in the middle
+of them, on the same token, in the same request.
+
+**Verdict: a member's token cannot read Calendar at all**, and the reason is a
+refusal shape this spike had not seen. Not the 403 vertex wall of 9.2, not the
+`bad_scope` 401 of 9.7 - a third thing, which says the request "could not be
+authenticated" about a token that demonstrably was.
+
+The section title is the finding. There are three ways PCO says no, they are
+not distinguishable by status code, and one of them is indistinguishable from a
+dead token.
+
+### 11.1 Three refusals, one token, one request
+
+The evidence, taken simultaneously rather than compared against a remembered
+sample from an earlier run:
+
+| Path | Condition | Status | `errors[0].code` | PCO's words |
+|---|---|---|---|---|
+| `/calendar/v2` | in scope, granted | **401** | `unauthorized` | "This request could not be authenticated. Error Code Hint: (TRASH_PANDA)" |
+| `/giving/v2` | **not** in scope | **401** | `bad_scope` | "The API credentials do not have access to the application giving" |
+| `/people/v2/campuses` | in scope, no permission | **403** | *(none)* | "User with id 152662737 cannot read ... `CampusVertex` collection" |
+
+Read the three details rather than the three statuses. `bad_scope` makes a claim
+about **the API credentials**. The 403 makes a claim about **the user**, and
+names the vertex. Calendar makes a claim about **the request**, and it is false.
+
+`giving` is deliberately absent from `PCO_SCOPES` and **must stay absent**. It
+is the control. Granting it would destroy the only unambiguous `bad_scope`
+sample obtainable without un-granting something else.
+
+**The ordering trap.** `"bad_scope"` contains the substring `"scope"`. A
+classifier that tests for `scope` before testing for `bad_scope` collapses the
+two 401s into one and erases this entire section. Test the specific code first.
+
+### 11.2 A scope grant is not access
+
+9.7 concluded that the scope check runs first and wins. That still holds, and it
+now needs a companion, because a granted scope was assumed to imply reachability
+and it does not:
+
+> **The scope is a ceiling on what the app may ask for, not a statement of what
+> this person may read.**
+
+Every cheap explanation was eliminated before this was written down:
+
+| Suspect | How it was killed |
+|---|---|
+| The scope never reached PCO (10.9's snag, in a new costume) | `/oauth/introspect` on the token **in hand**: `active: true`, scope `openid people groups calendar` |
+| The stored column echoes what we asked for rather than what was granted | `agrees_with_stored: true` - the live and remembered values match exactly |
+| The token is expired or broken | `/people/v2/me` returned `200` four probes later, same token |
+| Out of scope, i.e. the same error as `/giving/v2` | Different `code`, different `title`, different `detail` (11.1) |
+| The church has not activated Calendar | **Hope City's Church Center app has a Calendar tab showing events** |
+
+That last row is observation by a human in the Church Center app rather than by
+probe - a third category, and flagged as such. It is decisive anyway, and it is
+the most uncomfortable line in this file:
+
+> **Church Center shows this member calendar events that the member's own API
+> token cannot read.**
+
+Church Center does not run on member OAuth permissions. It is a privileged
+first-party surface, and on Calendar there is no parity available to anything
+built on the public API.
+
+### 11.3 The Person vertex cannot tell you which products you can reach
+
+8.6 established that PCO models per-product permission **on the Person**:
+`people_permissions` is People-app scoped and carries Manager / Editor / Viewer
+/ No access. The obvious next move is to look for `calendar_permissions` and
+pre-flight the whole problem.
+
+It is not there. Ten fields asked for by name, 8.1's rule applied because PCO
+gates some attributes behind `?fields`:
+
+```
+asked:    calendar_permissions, calendar_permission, services_permissions,
+          check_ins_permissions, giving_permissions, groups_permissions,
+          registrations_permissions, publishing_permissions,
+          people_permissions, site_administrator
+answered: people_permissions, site_administrator
+```
+
+**`people_permissions` and `site_administrator` are the positive control**, and
+they answered. Without them the silence of the other eight would mean nothing -
+an unsupported sparse read and a non-existent attribute produce the identical
+empty payload, which is 9.4's lesson wearing different clothes.
+
+So: **PCO surfaces a per-product permission on the Person for exactly one
+product, People.** The rule that falls out and that the product build has to
+absorb:
+
+> **Capability detection is a probe, not a lookup.** The only way to learn
+> whether a connection can reach a product is to call that product and read
+> `errors[0].code`. There is no attribute to check first, and there is no
+> cheaper path.
+
+Cache the answer per connection, because the alternative is a wasted round trip
+on every page load - and re-probe it, because 8.4 already established that PCO
+notifies you of nothing when permissions change.
+
+**`people_permissions` was `null`**, not `"No access"`. 8.6 recorded four
+values; `null` is a fifth, and it is not the same as the string. Anything
+branching on that attribute needs a null arm.
+
+### 11.4 401 cannot mean "the token is dead"
+
+The consequence with teeth. `TRASH_PANDA` arrives on a valid token that is
+refused a product. `BABOON` - the same `unauthorized` code, the same "we can't
+authenticate this request" - is [reported by developers hitting genuine
+refresh-token failures][pc602]. PCO overloads one bucket across unrelated
+causes and documents none of the animals.
+
+[pc602]: https://github.com/planningcenter/developers/issues/602
+
+Therefore:
+
+- **Never branch on `401` to decide whether to force re-authorization.** A
+  church that does not use one product would log its members out.
+- **`code: "unauthorized"` is not enough either**, because real token death
+  produces it too. The only reliable signal that a refresh is needed is a
+  failure of the **token endpoint**, which `refreshAccessToken` already owns.
+- `pcoFetchWithToken` throws `HttpError(res.status, ...)`, so a Calendar 401
+  propagates to the browser as a 401. The demo page survives this only because
+  it signs out on an explicit `action: "sign_out"` from the server and never on
+  a status - which is correct by accident rather than by design, and is the
+  shape the product must keep deliberately.
+
+### 11.5 What the Person actually carries
+
+The full default attribute list, recorded because a wrong field name should cost
+thirty seconds and because five of these matter more to the product than
+Calendar does:
+
+```
+accounting_administrator  anniversary            avatar
+birthdate                 can_create_forms       can_email_lists
+child                     created_at             demographic_avatar_url
+directory_status          first_name             gender
+given_name                grade                  graduation_year
+inactivated_at            last_name              login_identifier
+medical_notes             membership             middle_name
+name                      nickname               passed_background_check
+people_permissions        remote_id              resource_permission_flags
+school_type               site_administrator     status
+updated_at
+```
+
+- **`child`** - the minors gate. Every safety question in a member-to-member
+  product runs through it, and it is free, on People, for every church.
+- **`passed_background_check`** - sits on the Person, for every church, and is
+  exactly what any volunteering feature needs before it matches an adult to a
+  task involving children.
+- **`medical_notes`** - present on the Person vertex. Something to design *away*
+  from deliberately; it must never be read, cached or logged.
+- **`resource_permission_flags`** - a nested capability bag,
+  `{can_access_workflows: false}`, and a **second and different shape** of
+  permission modelling alongside `people_permissions`. One flag today. Worth
+  watching rather than building on.
+- **`membership`** and **`status`** - the church's own categorisation, and
+  `status: "active"` is not the same question as `directory_status` (9.5) or
+  `people_permissions`. Three attributes that look like permissions and are not,
+  now: 8.6 found two, 9.5 found the third, and this is the fourth family.
+
+### 11.6 The free-vs-paid axis was the wrong axis
+
+Calendar was chosen for this spike because Planning Center's pricing page
+advertises **"Unlimited events, pay for facilities management"** - free tier one
+room. Section 10.7 had just drawn the line between what every church is
+guaranteed and what it merely might have, and Calendar looked like the same line
+drawn inside one product: events free and unlimited, rooms metered.
+
+The probe measures both halves. **Neither half was ever reachable.** The room
+count that would have told us whether this church pays returned 401, like
+everything else.
+
+So 10.7's model needs a third column, and it is the one that actually decides
+product scope:
+
+| | Free for the church? | Every church has it? | **Reachable on a member's token?** |
+|---|---|---|---|
+| **People** | yes, unlimited | **yes, mandatory** | yes, narrowly - `/me` and what you are part of |
+| **Groups** | free to 15 members | no, optional | **yes, broadly** - own groups, full rosters, contact (10.4) |
+| **Calendar** | yes, unlimited events | yes, activated here | **no. Nothing. 401 on every path** |
+
+**Free for the church and reachable by us are orthogonal**, and the pricing page
+speaks only to the first. Calendar is the counter-example that proves they are
+independent axes: the most generously-priced product in the catalogue is the
+least reachable one we have found.
+
+Groups - optional, metered, skippable - gives a member far more than Calendar,
+which is free, unlimited and activated. **Adoption and pricing predict nothing
+about API reachability. Only a probe does** (11.3).
+
+### 11.7 What this means for the product build
+
+**No member-facing calendar feature can be built on member tokens.** This holds
+under both surviving explanations (11.9), which is why it is safe to write down
+while the cause is still open.
+
+**If a calendar feature is wanted, it runs on the service connection alone** -
+and that is strictly worse than the group tier. 10.8 recorded that group-scoped
+features survive a lapsed service connection because the member reads their own
+group directly. A calendar feature has no such fallback: when the church's
+background identity degrades, it goes dark completely. Whether the service
+connection can even read Calendar is **untested** (11.9) and must be settled
+before anything is designed on top of it.
+
+**Campus-local routing is still homeless.** 10.5 found Groups carries no campus
+edge; Calendar was the next place to look and it refused the question. 9.8's
+documentation claim that Calendar exposes no campus API remains unverified by
+observation - we never got far enough to check. `Person.primary_campus` through
+the include door (9.2), plus the service connection's campus list (9.9), remains
+the only mechanism this spike has found.
+
+**Do not chase Church Center parity.** 11.2 shows Church Center reading data the
+member's own token cannot. Any roadmap item phrased as "Church Center does X, so
+we should do X" needs this check first - some of what it does is not available
+to anyone outside Planning Center.
+
+**Rank products by probe result, never by pricing page.** The one-line version
+of 11.6, and the most transferable thing in this section.
+
+### 11.8 Snags
+
+- **`"bad_scope"` contains `"scope"`.** Classify the specific code before the
+  general one or the two 401s merge (11.1).
+- **A remembered control is not a control.** 9.7's `bad_scope` sample came from
+  a different token on a different day. Two 401s from two runs cannot be
+  compared; the probe now takes all three refusals in the request that is trying
+  to tell them apart.
+- **`introspect` was already in `_shared/pco.ts`** and is the answer to "is this
+  column telling the truth". A stored scope is written once, at store time,
+  against a token that has since rotated - it is a remembered value and belongs
+  on the suspect list whenever a scope-shaped failure appears.
+- **A guessed field name that does not exist and a real one that is null return
+  the same empty payload.** Every sparse-fields probe needs a known-real field
+  alongside the guesses, or its silence proves nothing (11.3).
+- **Thirty-one PCO requests in one invocation**, up from seventeen in 10.9. No
+  `429` yet at any point in this spike, and still nothing backing off. The
+  default-on sweep is most of it; `{sweep: false}` skips it.
+- **The probe returns event names verbatim.** Unlike the campus and group
+  probes, its output cannot be pasted into git unread - an event name is free
+  text a human typed, and "Premarital counseling - the Ruizes" is a name. It
+  reads no person resource, which is a different guarantee from returning no
+  personal data.
+- **Church Center answered the decisive question and no HTTP client could.**
+  `hopecityclt.churchcenter.com/calendar` is a JS-rendered SPA and fetches as
+  `Loading...`. The tester opening the app settled in five seconds what three
+  probe runs could not.
+
+### 11.9 Still not tested
+
+- **Whether the refusal is per-person or per-application.** Two explanations
+  survive: this member holds no Calendar permission in PCO, or **our OAuth
+  application** is not permitted Calendar regardless of who holds the token. The
+  second is the less likely - PCO answered `bad_scope` for an unrequested
+  product and something *different* here, which suggests the scope was honoured
+  and something downstream refused - but it is not excluded. **One run of
+  `pco-calendar` from the Charlotte Church row separates them:** a `200` for an
+  Organization Administrator means per-person; an identical `TRASH_PANDA` with
+  Calendar activated there means per-application, and that is a support ticket
+  rather than a design constraint.
+- **Whether the service connection can read Calendar at all.** 11.7 makes it the
+  only possible path for a calendar feature and nothing has tested it. If an
+  Organization Administrator is also refused, Calendar is closed to this
+  integration entirely.
+- **Every measurement the probe was built to take.** Event attributes and
+  `visible_in_church_center`, event instances and whether recurrence is
+  structured, date filtering by bracket syntax or `filter=future`, whether
+  Calendar validates unknown `where[]` keys or ignores them like People (9.4)
+  and Groups (10.5), the room count and therefore the paid-tier signal, tags,
+  and whether an event carries a campus (9.8's unverified documentation claim).
+  All of it returned 401. The code is written and will run the moment a token
+  gets past the door.
+- **What `resource_permission_flags` grows into.** One flag today
+  (`can_access_workflows`), a different shape from `people_permissions`, and no
+  documentation found for either.
+- **Whether `TRASH_PANDA` and `BABOON` are distinguishable causes** or one
+  bucket with a random animal. Only Planning Center can answer that, and 11.4's
+  rule is written to be correct either way.
