@@ -148,13 +148,22 @@ npx serve web -l 3000
    expires_at from pco_connections;` — one row, `expires_at` ~2 hours out.
 4. Click **Call /people/v2/me** → your own PCO person record.
 5. **Force the refresh path** — the single most likely thing to be silently
-   broken:
+   broken, and the easiest test to fool yourself with.
+
+   Reload the page FIRST, confirm the status panel reads `will_store_tokens:
+   false`, and only then expire the token:
    ```sql
    update pco_connections set expires_at = now() - interval '1 minute';
    ```
-   Call `/people/v2/me` again. It must still succeed, and the response's
-   `token.refreshed_during_request` must be `true`. Confirm `refresh_token` in
-   the row changed — that proves rotation is being persisted.
+   Now click **Call /people/v2/me** *without reloading again*. Expect
+   `expired_on_entry: true` and `refreshed_during_request: true`.
+
+   Reloading between the update and the click re-stores the connection and
+   resets `expires_at` to PCO's real `exp`, so the request under test finds a
+   live token, skips the refresh, and reports `refreshed_during_request: false`
+   — which reads like a pass. Verify against the row rather than the response:
+   `refresh_token` and `access_token` must both differ from their prior values,
+   and `refreshed_at` must advance.
 6. Temporarily drop the `User-Agent` header in `pcoFetch` and watch for the
    `403`. Restore it. Worth seeing once.
 7. Click **Disconnect**, then **Call /people/v2/me** → a clean 404
@@ -175,6 +184,16 @@ an already-approved app. Revoke the app in your PCO account before concluding
 the feature is broken.
 
 ## Gotchas found in practice
+
+**`SIGNED_IN` does not mean "just logged in".** It was observed firing on a hard
+reload of an existing session, because supabase-js persists the session (provider
+tokens included) to localStorage and re-emits on recovery. Gating any write on it
+re-runs that write on every page load. `INITIAL_SESSION` is not the answer either
+— both fire. The reliable signal is `?code=` in the URL, read synchronously at
+module load before supabase-js exchanges it and strips it.
+
+This cost two failed fixes before the page carried a build marker; without one, a
+stale cached page and a logic bug look identical from the database side.
 
 **Supabase sends its own confirmation email on first sign-in.** PCO's discovery
 document advertises exactly these claims:
