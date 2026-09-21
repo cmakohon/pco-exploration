@@ -326,16 +326,29 @@ Deno.serve(handler(async (req) => {
     skip(`/calendar/v2/event_instances?where[${BOGUS_FILTER_KEY}]=1`, "instances not readable");
   }
   const instTotal = totalOf(instDoc);
-  const unknownKeysIgnored = controlStatus === 200 && controlTotal !== null && instTotal !== null
-    ? controlTotal === instTotal
-    : null;
+  // Same degeneracy, one layer up: 0 === 0 is not proof that PCO ignored the
+  // key, so the control reports null rather than true on an empty collection.
+  const unknownKeysIgnored =
+    controlStatus === 200 && controlTotal !== null && instTotal !== null && instTotal > 0
+      ? controlTotal === instTotal
+      : null;
 
-  function dateVerdict(p: PcoProbe | null): string {
+  // `can_query_by` is PCO's own statement about which keys are real, and it
+  // outranks any arithmetic done on counts. 10.5 established that for Groups;
+  // the admin row proved why it matters, by producing a church with zero
+  // instances where every count comparison is 0 < 0 and the first version of
+  // this function confidently reported "ignored" for a key PCO lists as real.
+  function dateVerdict(p: PcoProbe | null, key: string | null): string {
     if (!p) return "not_attempted";
     if (p.status === 400) return "param_rejected";
     if (!p.ok) return `refused_${p.status}`;
+    // Authoritative and cheap. Consulted before the counts, never after.
+    if (key && instCanQueryBy && !instCanQueryBy.includes(key)) return "not_a_query_key";
     const t = totalOf(p.body as Doc);
     if (t === null || instTotal === null) return "inconclusive";
+    // The degenerate case. An empty collection filters to empty whether the
+    // filter bites or is thrown away, so nothing here is evidence of either.
+    if (instTotal === 0) return "inconclusive_empty_collection";
     if (t < instTotal) return "effective";
     if (unknownKeysIgnored === true) return "ignored";
     return "inconclusive";
@@ -562,13 +575,13 @@ Deno.serve(handler(async (req) => {
           window: { from, to },
           status: dateProbeA?.status ?? null,
           total_count: dateProbeA ? totalOf(dateProbeA.body as Doc) : null,
-          verdict: dateVerdict(dateProbeA),
+          verdict: dateVerdict(dateProbeA, "starts_at"),
         },
         filter_param: {
           attempted: Boolean(dateProbeB),
           status: dateProbeB?.status ?? null,
           total_count: dateProbeB ? totalOf(dateProbeB.body as Doc) : null,
-          verdict: dateVerdict(dateProbeB),
+          verdict: dateVerdict(dateProbeB, null),
         },
       },
     },

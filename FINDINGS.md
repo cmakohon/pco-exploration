@@ -1454,10 +1454,13 @@ Ranked by how much the answer changes the design.
 - **`group_type` through the `include` door.** The collection is empty (10.6);
   `can_include` offers it. If the include answers, 9.2's rule generalizes across
   products and the taxonomy is usable.
-- **The administrator's row.** Every number in this section is a member's. Does
-  an administrator see the church's full group list from `/groups/v2/groups`?
-  Section 8's two-pole comparison is the design this probe was built for and it
-  has only been run at one pole.
+- **The administrator's row.** *Run in 12.5, and only half-answered.* Both poles
+  agree that `/groups/v2/group_types` returns `200` with **0 rows to a member
+  and 1 to an administrator** - so Groups enforces permission by removing rows
+  rather than refusing, which is strong corroboration for 10.2. But Charlotte
+  Church has **zero groups**, so whether an administrator sees the church's full
+  group list from `/groups/v2/groups` is still open, and needs a church that is
+  both populated and administrable (12.6).
 - **A church with Groups installed and no groups configured**, and **a free-tier
   Groups church.** 10.7's degradation rule is reasoned, not observed; both
   states are asserted and neither has been seen.
@@ -1735,8 +1738,11 @@ of 11.6, and the most transferable thing in this section.
 
 ### 11.9 Still not tested
 
-- **Whether the refusal is per-person or per-application.** Two explanations
-  survive: this member holds no Calendar permission in PCO, or **our OAuth
+- ~~**Whether the refusal is per-person or per-application.**~~ **Answered in
+  12.1: per-person.** An Organization Administrator gets `200` from
+  `/calendar/v2` on the same application, same client id, same scope string.
+  The original reasoning, kept because it was right: two explanations
+  survived: this member holds no Calendar permission in PCO, or **our OAuth
   application** is not permitted Calendar regardless of who holds the token. The
   second is the less likely - PCO answered `bad_scope` for an unrequested
   product and something *different* here, which suggests the scope was honoured
@@ -1763,3 +1769,310 @@ of 11.6, and the most transferable thing in this section.
 - **Whether `TRASH_PANDA` and `BABOON` are distinguishable causes** or one
   bucket with a random animal. Only Planning Center can answer that, and 11.4's
   rule is written to be correct either way.
+
+---
+
+## 12. The administrator's row: what changes, and what does not
+
+Sections 9, 10 and 11 each ended by asking for the same thing - the second
+pole. Both probes run at Charlotte Church, where the tester is an Organization
+Administrator holding the church's service connection (`role: owner`,
+`is_service: true`, `site_administrator: true`, `people_permissions: Manager`).
+
+**Verdict: Calendar is gated per person, and the gate is the only thing between
+us and the whole product.** `/calendar/v2` answered `200` for an administrator
+on the same OAuth application whose token was refused thirty-one times as a
+member. That closes 11.9's leading question, and it means the Calendar surface
+can finally be mapped - which it now is, including the first `404`s this spike
+has ever been able to trust.
+
+It also produced a finding nobody went looking for: **campus ids are not the
+same number in every product** (12.3).
+
+And it is a reminder that an empty church answers fewer questions than a real
+one (12.6). Charlotte Church has no groups, no events and no resources, so
+several things 10.10 and 11.9 asked for are still open - and two probe defects
+that only a zero-row church could expose are fixed in 12.8.
+
+### 12.1 Calendar is per-person, not per-application
+
+| | Hope City (member) | Charlotte Church (administrator) |
+|---|---|---|
+| `/calendar/v2` | **401** `unauthorized` / TRASH_PANDA | **200** |
+| `/people/v2/campuses` | **403** `CampusVertex` collection | **200** |
+| `/giving/v2` (control) | **401** `bad_scope` | **401** `bad_scope` |
+| `site_administrator` | `false` | `true` |
+| `people_permissions` | `null` | `Manager` |
+
+Same OAuth application, same client id, same scope string, same code path. The
+only variable is the person. **11.9's second hypothesis is dead:** the
+application is permitted Calendar, and 11.2's rule survives intact - a granted
+scope is a ceiling on what the app may ask for, not a statement of what this
+person may read.
+
+The `bad_scope` control answering identically at both poles is what makes that
+readable. Without it, "the admin got 200" would be compatible with the member's
+connection simply being broken.
+
+**Note the administrator's `directory_status` is also `no_access`** - and they
+read `/people/v2/campuses` anyway. 9.5 recorded `directory_status` as a third
+attribute that looks like permissions and is not; this is that finding at the
+opposite pole, and it is now hard to state more plainly. Do not gate anything
+on it.
+
+**And there is still no `calendar_permissions` attribute** - the same ten-field
+sparse read, the same two known-real controls answering, the same eight guesses
+absent, for an Organization Administrator. 11.3's rule holds at both poles:
+**capability detection is a probe, not a lookup.**
+
+### 12.2 The Calendar surface, finally mapped
+
+The first sweep in this spike that carried information. 9.7 established that
+outside a scope every path returns an identical `401` and a sweep is worthless;
+inside the scope, with permission, `404` and `200` finally mean different things.
+
+**Five of the eighteen guessed nouns do not exist:**
+
+```
+404  /calendar/v2/event_times          404  /calendar/v2/event_connections
+404  /calendar/v2/required_approvals   404  /calendar/v2/resource_suggestions
+404  /calendar/v2/reports
+```
+
+**Thirteen do**, including `conflicts`, `feeds`, `attachments`, `room_setups`,
+`resource_bookings`, `event_resource_requests`, `resource_approval_groups`,
+`resource_questions` and `job_statuses`.
+
+`event_times` is the instructive one: **`404` as a collection, but present in
+`can_include` on an event instance.** A noun can be sideloadable without being
+addressable. Do not infer a collection from an include, or an include from a
+collection.
+
+What PCO says it will let you filter and sideload - the part that decides
+whether a product is buildable:
+
+| Collection | `can_query_by` | `can_include` |
+|---|---|---|
+| `events` | `approval_status`, `created_at`, `featured`, `link_only`, `name`, `feed_id`, `percent_approved`, `percent_rejected`, `updated_at`, **`visible_in_church_center`** | `attachments`, `calendar`, `feed`, `owner`, `tags` |
+| `event_instances` | `calendar_ids`, `created_at`, `ends_at`, **`event_name`**, `kind`, **`starts_at`**, **`tag_ids`**, `updated_at` | `event`, `event_times`, `resource_bookings`, `tags` |
+
+Three of those matter more than the rest:
+
+- **`visible_in_church_center` is a query key.** The church has already decided
+  which events are for the congregation; that decision is filterable, not just
+  readable. A member-facing calendar does not have to guess, and must not.
+- **`starts_at` and `ends_at` are query keys.** Date windows work, so nothing
+  needs to pull a whole calendar to render a week.
+- **`events.can_order_by` came back `null`.** Ordering is not offered on events
+  the way it is on groups (10.2). Sort locally, or work through instances.
+
+### 12.3 A campus is not the same id in every product
+
+Charlotte Church has exactly one campus, named West. Asked three ways:
+
+| Asked | Campus id |
+|---|---|
+| `/people/v2/me` → `primary_campus` (9.1) | `127163` |
+| `/groups/v2/campuses` | `127163` |
+| `/calendar/v2/campuses` | **`100405`** |
+
+One campus. One name. Two different ids, in the same church, in the same
+request window.
+
+Cross-checked at the other pole, which agrees: at Hope City the member's
+`primary_campus` from People is `95199` "West" (9.1), and `/groups/v2/campuses`
+lists `95199` "West" (10.1). **People and Groups share a campus id space.
+Calendar does not.**
+
+The consequence is worse than it first looks, because of 9.4 and 10.5:
+
+> A campus id cached from People, used to filter a Calendar read, does not
+> error. Unknown `where[]` keys are **ignored**, so it returns the unfiltered
+> set and looks like it worked.
+
+**Key every cached campus by `(product, id)`, never by id alone**, and never
+carry an id across a product boundary without a translation. The only stable
+join between them observed so far is the campus *name*, which is a string a
+human typed and is not a key.
+
+Stated with its limit: one church, one campus, one comparison. But the two
+products disagreeing at all is the finding, and a single unambiguous
+disagreement is enough to forbid the assumption.
+
+### 12.4 Calendar has campuses; Calendar events have no campus
+
+9.8 recorded, from documentation, that "Services and Calendar expose no campus
+API at all". Observation splits that claim in half:
+
+- **False for the collection.** `/calendar/v2/campuses` exists and answers.
+- **True for the linkage.** `events.can_include` is `attachments`, `calendar`,
+  `feed`, `owner`, `tags` - no campus. Neither `events.can_query_by` nor
+  `event_instances.can_query_by` offers a campus key. There is nothing to join
+  an event to a campus with.
+
+So 10.5's conclusion extends rather than reverses: **Groups has no campus edge,
+and neither does Calendar.** Three products now expose a campus list and only
+People links a *person* to one.
+
+The grouping dimensions Calendar actually offers are **`calendar_ids`** and
+**`tag_ids`**, both queryable on instances. Any campus locality in a church's
+calendar is therefore a per-church *convention* expressed through sub-calendars
+or tags - not a platform feature, not guaranteed, and not discoverable without
+asking that church. Charlotte Church's single tag is in fact named "West",
+which is suggestive and nothing more: it is a test organization and the tester
+made the tag.
+
+**Campus-local routing remains homeless after three products.**
+`Person.primary_campus` through the include door (9.2) plus the service
+connection's cached list (9.9) is still the only mechanism this spike has found.
+
+### 12.5 Groups filters rows silently; it does not refuse
+
+10.6 flagged `/groups/v2/group_types` returning `200` with an empty list as
+9.3's ambiguity in a new place, and guessed the taxonomy was shut to a member.
+The second pole confirms it:
+
+| | Hope City (member) | Charlotte Church (administrator) |
+|---|---|---|
+| `/groups/v2/group_types` | `200`, **0 rows** | `200`, **1 row** |
+
+Both `200`. Neither a `403`. **Groups enforces permission by removing rows, not
+by refusing the request** - which is a fundamentally different mechanism from
+the People vertex wall of 9.2, and far more dangerous to read casually:
+
+> In Groups, an empty collection and a forbidden one are **the same response**.
+> There is no error to branch on, no vertex named in a message, and nothing in
+> the payload that distinguishes "this church has none" from "you may not see
+> them". Only comparing two callers tells them apart.
+
+That is strong corroboration for 10.2's reading of `/groups/v2/groups`
+returning only the caller's own groups - the same silent row filter, on a
+sibling collection. It is corroboration and not proof, because Charlotte Church
+has zero groups (12.6).
+
+The group type itself: **`id: "unique"`, a string, not a number** - PCO's
+built-in bucket for groups belonging to no type. Attribute keys are
+`church_center_map_visible`, `church_center_visible`, `color`,
+`default_group_settings`, `description`, `name`, `position`,
+`public_church_center_web_url`. Note `church_center_visible: false` on it, and
+`default_group_settings` - a per-type default that presumably seeds
+`members_are_confidential` and friends (10.6).
+
+### 12.6 An empty church cannot answer a question about rows
+
+Charlotte Church has **0 groups, 0 events, 0 event instances, 0 resources**. It
+is the right pole for permission questions and the wrong one for behaviour
+questions, and the distinction is worth stating because the probes did not make
+it and reported nonsense twice (12.8).
+
+Still open *because the church is empty*, not because anything refused:
+
+- **Whether `/groups/v2/groups` is caller-scoped** (10.2). Zero rows are
+  consistent with every hypothesis.
+- **Whether Calendar's date filters bite.** `can_query_by` lists `starts_at`
+  and `ends_at`, which is PCO's own statement and is the load-bearing evidence
+  (10.5's lesson). The count arithmetic was `0 < 0` and proves nothing.
+- **Whether Calendar ignores unknown `where[]` keys** like People (9.4) and
+  Groups (10.5). Control returned `0` against a baseline of `0`.
+- **Every event attribute**, including whatever `visible_in_church_center`
+  looks like on a real record, and whether an event carries anything
+  group-shaped (10.6's unparseable `schedule` having a structured twin).
+
+**The rule: permission questions go to the administrator's row; behaviour
+questions go to the church with data in it.** Neither pole answers both, and
+this spike has no church that is both real and administrable.
+
+One suggestive scrap worth chasing: **`/calendar/v2/people` returned
+`total_count: 1`** at a church where exactly one person has Calendar access. If
+that collection enumerates people *with Calendar permission*, it is the
+capability lookup 11.3 says does not exist - just on the product side rather
+than the Person side. One data point, and the trivial reading (the church has
+one person) fits equally well. Untested (12.9).
+
+### 12.7 What this means for the product build
+
+**Calendar is a service-connection surface. Members never touch it.** 11.7 said
+this while the cause was open; 12.1 settles the cause without changing the
+conclusion. Every calendar feature therefore depends on the church's background
+identity staying healthy, with **no member-token fallback** - strictly worse
+than the group tier, which 10.8 found survives a lapsed service connection
+because the member reads their own group directly.
+
+**But the shape of a good calendar feature is now visible**, and it is better
+than expected:
+
+```
+GET /calendar/v2/events?where[visible_in_church_center]=true
+GET /calendar/v2/event_instances?where[starts_at][gte]=…&where[starts_at][lte]=…
+```
+
+The church has already decided what the congregation should see, that decision
+is a query key, and date windows are a query key too. A "what's on" surface can
+pull exactly the published subset for exactly the week in question, on the
+service connection, and **mirror the church's own visibility decision rather
+than inventing a second one** - which is 10.8's rule about `listed` and
+`members_are_confidential`, arriving independently in a third product.
+
+**Never join campus ids across products** (12.3). This is the single most
+expensive mistake available right now, because it fails silently rather than
+loudly.
+
+**Never read an empty Groups collection as "none"** (12.5). Groups removes rows
+instead of refusing, so a member's empty group-type list, empty group list, or
+empty anything is indistinguishable from a permission boundary. Where the
+difference matters, the service connection is the only second opinion.
+
+**The product tiering from 11.6 stands, with Calendar's row now measured rather
+than inferred:**
+
+| | Free for the church? | Every church has it? | Reachable on a member's token? | Reachable on the service connection? |
+|---|---|---|---|---|
+| **People** | yes, unlimited | yes, mandatory | narrowly - `/me` and what you are part of | broadly |
+| **Groups** | free to 15 members | no, optional | **broadly** - own groups, rosters, contact | untested |
+| **Calendar** | yes, unlimited events | yes | **no** | **yes, confirmed** |
+
+### 12.8 Snags
+
+- **A zero baseline decides nothing, and the probe said otherwise.** With zero
+  event instances, `0 === 0` made the control report `unknown_where_keys_ignored:
+  true`, and the date-filter verdict read `ignored` for `starts_at` - a key PCO
+  itself lists in `can_query_by`. Two wrong answers stated confidently. Fixed:
+  the control returns `null` on an empty collection, and the verdict consults
+  `can_query_by` **before** any arithmetic and returns
+  `inconclusive_empty_collection` when the baseline is zero. This is 10.5's
+  lesson - `can_query_by` outranks counting - learned a second time because the
+  first version only used it as a tiebreak.
+- **`!memProbe?.ok` is `true` when `memProbe` is `null`.** The Groups probe
+  reported `groups_visible_roster_forbidden` at a church with no groups, for a
+  roster it never requested. Optional chaining turns "not attempted" into
+  "failed" silently. Fixed by testing `memProbe && !memProbe.ok`, with a
+  distinct verdict for a church that has nothing to probe. Same family as
+  10.9's `includes_caller` defect: a value derived from an absent measurement
+  presented as a measurement.
+- **Both defects needed an empty church to surface.** Neither was reachable at
+  Hope City, and both had been shipped and committed. A second pole is a test
+  environment, not only a permissions comparison.
+- **`can_order_by` is `null` on events** and a populated array on groups. Absent
+  and empty are different, and a null here is PCO declining to offer ordering
+  rather than offering none.
+
+### 12.9 Still not tested
+
+- **Everything in 12.6** - the behaviour questions that need a church with rows
+  and an administrator's token at the same time. This is now the single biggest
+  gap in the spike, and no organization currently available satisfies both.
+- **Whether `/calendar/v2/people` enumerates Calendar-permitted people.** If it
+  does, capability detection gets a cheap answer after all (12.6).
+- **Whether the service connection can read Groups.** 12.7's table has an
+  untested cell: Charlotte Church's zero groups means the administrator's Groups
+  reach was never exercised against real rows.
+- **Which Calendar permission level is the threshold.** The administrator tested
+  is an Organization Administrator, the maximum. Whether a Calendar Viewer or
+  Editor - or any non-administrator with an explicit Calendar role - also gets
+  `200` is unknown, and it decides whether "the church's service connection"
+  must be an Organization Administrator forever or can be a lesser account.
+- **Whether campus ids differ across products at a second church**, and whether
+  Giving, Registrations and Check-Ins each have their own space again (12.3).
+- **Whether `default_group_settings` on a group type seeds
+  `members_are_confidential`** (12.5), which would make the confidentiality flag
+  10.10 flagged as critical a per-type default rather than a per-group choice.

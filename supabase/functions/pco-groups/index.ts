@@ -401,8 +401,16 @@ Deno.serve(handler(async (req) => {
     verdict = myGroupsSource
       ? "own_groups_and_roster_readable"
       : "roster_readable_but_own_groups_undiscoverable";
-  } else if (listProbe.ok && !memProbe?.ok) verdict = "groups_visible_roster_forbidden";
-  else if (listProbe.ok) verdict = "groups_visible_no_memberships";
+  } else if (listProbe.ok && groupRows.length === 0) {
+    // Nothing was refused - there was nothing to ask about. The admin row at
+    // an empty church reported "roster forbidden" for a roster never
+    // requested, because `!memProbe?.ok` is true when memProbe is null.
+    verdict = myGroupIds.length === 0
+      ? "no_groups_visible_nothing_to_probe"
+      : "own_groups_known_but_list_empty";
+  } else if (listProbe.ok && memProbe && !memProbe.ok) {
+    verdict = "groups_visible_roster_forbidden";
+  } else if (listProbe.ok) verdict = "groups_visible_no_memberships";
   else verdict = "group_list_forbidden";
 
   const after = await getConnection(admin, user.id, orgId);
