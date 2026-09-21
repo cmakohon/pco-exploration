@@ -554,7 +554,28 @@ show you either fact; only the table can.
   `{"can_access_workflows": false}`. Single-product and not org-wide; do not
   build a gate on it.
 
-### 8.7 Snags
+### 8.7 A degraded church must not become an unjoinable one
+
+Disconnecting the only owner's connection correctly degraded the church to
+`needs_service_connection` - and then locked the owner out of the only action
+that repairs it, because `pco_org_join` refused every status except `active`.
+The church was bricked with no path back short of hand-editing a row.
+
+Fixed in `0004`. Two rules worth carrying forward:
+
+- **Only `suspended` bars the door.** `needs_service_connection` means degraded,
+  not closed. A status that describes a *capability* the church has lost should
+  never be enforced as a *permission* it has forfeited.
+- **The repair is the ordinary path, not a special one.** Storing a connection
+  for an owner or admin, when the service slot is empty, adopts it and restores
+  the church to `active`. There is no recovery flow to discover and nothing to
+  remember to run - reconnecting simply works.
+
+The happy path cannot find this: a church with two administrators promotes a
+successor on disconnect and never degrades at all. It took disconnecting a
+sole owner, which is also the likeliest real-world shape for a small church.
+
+### 8.8 Snags
 
 **Every connection RPC signature changed, and Postgres overloads by signature.**
 `CREATE OR REPLACE` with new parameters leaves the old
@@ -600,7 +621,17 @@ tokens stay in the browser's memory across that round trip. A reload destroys
 them and the resulting failure looks exactly like a permissions bug - which is
 why the Status panel reports `provider_tokens_in_memory`.
 
-### 8.8 Still not tested
+### 8.9 Verified at the boundary
+
+- **Revocation does not cross tenants.** Disconnecting one church revoked its
+  refresh token at PCO while the other church's access token still returned
+  `200`. Verified against PCO, not against our own rows (5.3).
+- **Disconnect degrades visibly rather than silently.** `was_service: true`,
+  `promoted_connection_id: null`, `organization_degraded: true`, the connection
+  row gone, and the vault invariant back to `true` - both secrets deleted with
+  the row rather than orphaned.
+
+### 8.9 Still not tested
 
 - The orphan reap itself. The guard was verified (a user who already belongs to
   one church is **not** deleted when refused at another), but the deletion path
