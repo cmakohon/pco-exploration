@@ -633,26 +633,52 @@ why the Status panel reports `provider_tokens_in_memory`.
 
 ### 8.9 Verified at the boundary
 
+Asserted against rows and against Planning Center - never against our own
+responses (5.2, 5.3).
+
+- **The migration landed in place.** After `0003`, the pre-existing connection
+  still decrypted through the new org-aware RPC with `refreshed_at` unmoved
+  (14:35, well before the migration ran) and its Vault secret ids unchanged.
+  Nobody reconnected. An advanced `refreshed_at` would have meant something
+  rewrote the tokens.
+- **Registration happy path.** An Organization Administrator registered a
+  church: `admin_verification_method: "site_administrator"`, `admin_verified_at`
+  stamped, owner membership created, and their connection adopted as the
+  service connection.
+- **Isolation.** `pco_connection_get` returns `[]` for a church the user does
+  not belong to **even with the `service_role` key**, and the seven definer
+  functions all return `42501` to the anon key.
 - **Revocation reaches PCO, and only for that church.** The disconnected
   church's own access token went `200` -> `401` when curled directly at PCO
   before and after, while the other church's token continued to answer `200`.
-  Verified against Planning Center, never against our own rows (5.3). Deleting
-  a row is not revoking a token, and only this test knows the difference.
+  Deleting a row is not revoking a token, and only this test knows the
+  difference.
 - **The self-heal works through the ordinary path.** After a degrade, simply
   reconnecting as the owner restored `is_service` and flipped the church back to
-  `active` - no recovery flow, no manual step. Reconnect also minted a fresh
-  Vault secret pair rather than reusing the deleted one, as it should.
-- **Disconnect degrades visibly rather than silently.** `was_service: true`,
-  `promoted_connection_id: null`, `organization_degraded: true`, the connection
-  row gone, and the vault invariant back to `true` - both secrets deleted with
-  the row rather than orphaned.
+  `active` - no recovery flow, no manual step. Reconnect minted a fresh Vault
+  secret pair rather than reusing the deleted one.
+- **The Vault invariant held at every checkpoint:**
+  `(select count(*) from pco_connections) * 2 = (select count(*) from vault.secrets)`
+  was `true` throughout - through registration, refusal, rotation, disconnect
+  and reconnect. Any test that leaves it false has leaked or orphaned a secret.
 
-### 8.9 Still not tested
+### 8.10 Still not tested
 
-- The orphan reap itself. The guard was verified (a user who already belongs to
-  one church is **not** deleted when refused at another), but the deletion path
+Recorded rather than waved through. Each is blocked on needing another person,
+not on effort.
+
+- **The promote branch of service handover.** The *degrade* branch is verified -
+  a sole owner disconnecting leaves the church `needs_service_connection` with
+  no promotion. Promotion needs a church with two administrators, each holding
+  their own connection.
+- **The orphan reap itself.** The guard is verified: a user who already belongs
+  to one church is **not** deleted when refused at another. The deletion path
   needs a brand-new account at an unregistered church who is *not* an admin -
   and an admin is never reaped, by design.
-- Service-connection handover on disconnect.
-- Hope City remains `migrated_unverified`: it was claimed by the backfill's
+- **Registering an already-claimed church.** Neither the `409 claimed_by_other`
+  path nor the `200 already_owner` idempotent path has been exercised. Both
+  need a second Organization Administrator in the same PCO organization. The
+  `unique (pco_organization_id)` constraint is the real arbiter, so the risk is
+  in how the two functions *report* the conflict, not in whether it is caught.
+- **Hope City remains `migrated_unverified`.** It was claimed by the backfill's
   construction and no one who can prove admin rights there has registered it.
