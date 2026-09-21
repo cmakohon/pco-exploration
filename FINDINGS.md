@@ -1219,7 +1219,12 @@ returns `Group` rather than a join row.
 ```
 
 **This is the finding the product turns on.** A member token can read who is in
-their group and how to reach them. No service connection, no administrator, no
+their group and how to reach them.
+
+> **Corrected by 15.1.** The first half holds. The second does not: at this
+> same group, **2 of 25 people carry an email and 0 carry an address**. The
+> attribute keys below are present and the arrays behind them are empty. Key
+> presence was never the answer, and this section treated it as one. No service connection, no administrator, no
 directory permission - the same token that People answers `no_access` to.
 
 Three qualifications, none of them small:
@@ -2307,6 +2312,11 @@ has no clean source: the group's own events (`/groups/v2/groups/{id}/events`,
 readable by a member per 10.6) are the only candidate, and at this church there
 were none to inspect.
 
+> **Solved in 15.3.** That candidate works. At Hope City the endpoint returns
+> five events on a member's token with real `starts_at`, `ends_at`, `repeating`
+> and `canceled`. The Group's free-text `schedule` is a human summary sitting
+> beside a machine-readable list, not instead of one. Read the events.
+
 ### 13.7 Snags
 
 - **Both later probes shipped without a negative filter.** `pco-campuses` has
@@ -2379,7 +2389,13 @@ concrete instance of "the failure mode is a larger answer rather than an error",
 landing on the one table in Groups that maps people to each other.
 
 **It is not a permission leak.** The row filter of 13.5 and 12.5 still applies -
-the administrator sees two because there are two and they may see both. A member
+the administrator sees two because there are two and they may see both.
+
+> **Narrowed by 15.2.** "Every membership the caller can see" was too specific.
+> At Hope City the same request returns **23**, which is neither the caller's 2
+> nor the 67 inside their own groups. The filter is definitively discarded -
+> that holds at both poles - but the collection's actual scope rule is
+> unexplained. A member
 would get the memberships within their own groups and no further. Nothing
 crosses a tenant or a visibility boundary.
 
@@ -2439,10 +2455,9 @@ wrong question (14.3).
 
 ### 14.3 Still not tested
 
-- **Whether the contact arrays carry values at a real church.** The measurement
-  exists now; it needs one run of `pco-groups` at Hope City, whose 55-person
-  roster is the only real data available. This is the single remaining question
-  that changes whether the group tier is a product.
+- ~~**Whether the contact arrays carry values at a real church.**~~ **Answered
+  in 15.1: mostly not.** 2 of 25 carry an email, 2 a phone, 0 an address, 25 an
+  avatar. The group tier reads identity and not reachability.
 - **Whether `/groups/v2/memberships` declares any usable query key.** 14.1
   proves `person_id` is discarded but the probe never captured that collection's
   `meta.can_query_by`. If it declares `group_id`, the collection becomes useful
@@ -2461,3 +2476,195 @@ wrong question (14.3).
 - **Everything carried forward from 13.8** that this run did not touch:
   `published_starts_at` versus `starts_at`, resource bookings and the paid
   tier, and the `approval_status` value set.
+
+---
+
+## 15. The roster is readable and mostly unreachable
+
+`pco-groups` at Hope City with the contact measurement added - the run 14.3
+called the single remaining question that decides whether the group tier is a
+product.
+
+**Verdict: a member's token reads who is in their group, and cannot reach
+almost any of them.** Of 25 people returned from a 55-person roster, **2 carry
+an email address, 2 carry a phone number, and 0 carry a postal address.** All
+25 carry an avatar.
+
+This overturns the central claim of 10.4, which read the attribute *names* and
+concluded that a member token can read "who is in their group and how to reach
+them". The first half holds. The second does not.
+
+It also corrects 14.1, which described `/groups/v2/memberships` more
+confidently than the evidence supported (15.2).
+
+And it closes 13.6's rhythm problem in the other direction: a member **can**
+read their group's meetings, and they are structured (15.3).
+
+### 15.1 Two of twenty-five
+
+```
+email_addresses   people_with_at_least_one: 2   of_people: 25   total_entries: 2
+phone_numbers     people_with_at_least_one: 2   of_people: 25   total_entries: 3
+addresses         people_with_at_least_one: 0   of_people: 25   total_entries: 0
+avatar_url        people_with_at_least_one: 25  of_people: 25   total_entries: 25
+```
+
+Counts only - the probe never reads a value, a partial value or a domain, which
+is what makes this measurable at all at a church where 55 real people are
+involved.
+
+**The attribute keys were never the answer.** `email_addresses` and
+`phone_numbers` appear on every sideloaded Person at both poles (10.4, 14.2).
+They are present and empty for 23 of 25 people. Four sections of this file
+treated key presence as the finding; it took counting to see that the arrays
+are there and the data is not.
+
+**The likely explanation is role, and it is not yet confirmed.** The five-row
+membership sample carries exactly two `leader`s, and exactly two people carry
+contact details. If those are the same two, PCO is not failing to have the
+data - it is deliberately exposing the people a member is *meant* to be able to
+contact and withholding the rest of the congregation, which would be correct
+behaviour and a materially different product. The probe now joins role to
+contact presence and counts the cut; the run has not happened (15.6). Until it
+does, "2 of 25" is the fact and "because they are leaders" is a hypothesis.
+
+**The caller's own `directory_status` is `no_access`** (8.6, 9.5), which is the
+other candidate explanation and the one that would generalise worse: contact
+visibility might track the People-side directory permission rather than group
+role. Both readings fit the same two rows. They are distinguished by the role
+cut, and by running this at a church where the caller has directory access.
+
+**`addresses: 0 of 25` is the one that bites hardest.** A meal train needs a
+delivery address, and Planning Center will not supply it to a member's token
+even for people in their own group. That address has to come from the recipient,
+inside our own product, every time.
+
+### 15.2 Correction: `/groups/v2/memberships` is scoped by something we cannot name
+
+14.1 established that `where[person_id]` is discarded, and described the result
+as "every membership the caller can see". Hope City shows that description was
+too specific:
+
+| Church | Caller's own memberships | Memberships in caller's groups | `?where[person_id]=<self>` |
+|---|---|---|---|
+| Charlotte Church | 1 | 2 | **2** |
+| Hope City | 2 | 55 + 12 = **67** | **23** |
+
+**23 is neither.** It is not the caller's 2, so the filter is definitively
+discarded - that part of 14.1 stands, now confirmed at both poles. But it is
+also not the 67 memberships sitting inside the caller's own groups, and the
+caller demonstrably *can* see 55 of those through
+`/groups/v2/groups/2583839/memberships` in the same request.
+
+So the collection applies a scope rule that is narrower than "everything
+visible" and wider than "this person", and **nothing observed explains it.**
+Recorded as unexplained rather than guessed at (15.6).
+
+The practical rule is unchanged and strengthened: **prefer the scoped path over
+the `where` clause.** `/groups/v2/people/{id}/memberships` returned exactly `2`
+at Hope City and exactly `1` at Charlotte - correct at both poles, both times,
+while the query form was wrong at both.
+
+### 15.3 A member can read their group's meetings, and they are structured
+
+`GET /groups/v2/groups/2583839/events` returns **5 events** on an ordinary
+member's token:
+
+```
+attendance_requests_enabled  automated_reminder_enabled  canceled  canceled_at
+description  ends_at  image  location_type_preference  multi_day  name
+reminders_sent  reminders_sent_at  repeating  starts_at  virtual_location_url
+visitors_count
+```
+
+**Real `starts_at` and `ends_at`, plus `repeating` and `canceled`.** This closes
+the problem 13.6 raised and could not solve. The inversion there was that
+Calendar knows when things happen and members cannot read it, while a group's
+`schedule` is unparseable prose (10.6) - leaving "your group meets Tuesday" with
+no clean source.
+
+It has one. **A group's own events endpoint is readable by a member and carries
+structured times.** The free-text `schedule` on the Group is a human-written
+summary sitting alongside a machine-readable event list, not instead of one -
+the same relationship Calendar has between `recurrence_description` and
+materialized instances (13.3).
+
+Do not read `schedule`. Read the events.
+
+### 15.4 The `includes_caller` fix behaves correctly under partial pages
+
+```
+total_count: 55   returned: 25
+includes_caller: false   includes_caller_conclusive: false   page_is_whole_collection: false
+```
+
+The original defect (10.9) computed this from the five-row redacted sample and
+reported a bare `false` for a caller who is in the group. The fix computes it
+over all 25 returned rows and, crucially, **reports that 25 of 55 cannot settle
+the question.** `false` with `includes_caller_conclusive: false` is legible as
+"not on this page"; the old bare `false` was not.
+
+14.2 verified the affirmative case at Charlotte Church, where 2 of 2 made it
+conclusive. This verifies the negative case. Both arms now work.
+
+### 15.5 What this means for the product build
+
+**The product cannot be a messaging layer over the roster**, and that is now a
+finding rather than a preference. PCO exposes *identity* to a member - names,
+avatars, who is in the group - and withholds *reachability*. 10.6 noted that
+Groups already ships `chat_enabled` and `direct_messages_enabled` and concluded
+"do not build chat". 15.1 is why: Planning Center keeps the contact graph and
+lends out the display graph.
+
+**Build reachability from our own users, not from Planning Center.** Everyone
+who signs into our product arrives through PCO OAuth carrying `email` in the
+`id_token` (section 3). That is a contact route PCO grants us directly, for the
+people who chose to use us. So:
+
+> Use the PCO roster for the **graph** - who is in this group, who leads it, how
+> big it is. Use our own user table for the **reach**. The two overlap for
+> everyone who has signed up, and the gap is exactly the set of people we have
+> no standing to contact anyway.
+
+This is a better design than the one 10.8 implied and it removes a dependency
+rather than adding one. It also means a group's usefulness to us grows with
+adoption inside that group, which is the loop the product wants regardless.
+
+**A meal train collects its own delivery address.** `addresses: 0 of 25` (15.1).
+There is no path to a member's address through a member's token, and designing
+as though there were would have failed at the first real church.
+
+**Avatars are free and universal** - 25 of 25. A roster can look like people
+rather than rows without any contact data at all, which matters more than it
+sounds for a product whose whole premise is that these are your neighbours.
+
+**Group rhythm is available after all** (15.3). Anything that wants to ask the
+group at the right moment can.
+
+**If the role hypothesis holds** (15.1), the shape is better still: route care
+*through the group's leaders*, who are both reachable and the pastorally correct
+recipients. That is a more defensible product than broadcasting to 55 people,
+and it would mean PCO's redaction pushed us somewhere good. Confirm before
+designing on it.
+
+### 15.6 Still not tested
+
+- **Whether contact presence tracks `role`.** The measurement is deployed and
+  unrun. It decides between "route through leaders" and "there is no route",
+  which are different products (15.1).
+- **Whether contact visibility instead tracks the caller's `directory_status`.**
+  The tester is `no_access` at both churches, so every contact observation in
+  this file comes from a caller with no People directory permission. A caller
+  with directory access might see all 55. This is the alternative explanation
+  for 15.1 and it has never been varied.
+- **What scopes `/groups/v2/memberships`.** 23 at Hope City, unexplained (15.2).
+  Capturing that collection's own `meta.can_query_by` and `can_include` is the
+  obvious next probe and was never taken.
+- **Whether `role` is queryable on memberships**, which is what "fetch this
+  group's leaders" needs as a single request rather than a scan.
+- **The remaining page of the roster.** Only the first 25 of 55 were ever
+  fetched; pagination has not been exercised anywhere in this spike, and
+  `links.next` has never been followed.
+- **Everything carried forward from 13.8 and 14.3** that these runs did not
+  touch: `published_starts_at` versus `starts_at`, resource bookings and the
+  paid tier, and the `approval_status` value set.

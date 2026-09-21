@@ -311,8 +311,47 @@ Deno.serve(handler(async (req) => {
       total_entries: total,
     };
   }
+  /**
+   * Is reachability a function of ROLE?
+   *
+   * At Hope City exactly 2 of 25 people carried an email, and the first five
+   * membership rows contained exactly 2 leaders. If those are the same two
+   * people, PCO is not withholding contact details at random - it is exposing
+   * the people a member is meant to be able to contact, and withholding the
+   * rest of the congregation. That is a different product from "the roster is
+   * unreachable", and a better-behaved one.
+   *
+   * Joins the membership rows to the sideloaded Person by id. Counts only, and
+   * the same discipline as populationOf: how many, never who, never a value.
+   */
+  const personById = new Map<string, Doc>(
+    includedPersons.map((p: Doc) => [String(p?.id), p]),
+  );
+  const includedMemberships: Doc[] = Array.isArray((memIncluded?.body as Doc)?.data)
+    ? (memIncluded!.body as Doc).data
+    : [];
+  const byRole: Record<string, { n: number; with_email: number; with_phone: number }> = {};
+  for (const m of includedMemberships) {
+    const role = String((m?.attributes ?? {}).role ?? "unknown");
+    const pid = m?.relationships?.person?.data?.id
+      ? String(m.relationships.person.data.id)
+      : null;
+    const attrs = (pid ? personById.get(pid)?.attributes : null) ?? {};
+    const has = (f: string) => {
+      const v = (attrs as Record<string, unknown>)[f];
+      return Array.isArray(v) ? v.length > 0 : Boolean(v);
+    };
+    byRole[role] ??= { n: 0, with_email: 0, with_phone: 0 };
+    byRole[role].n++;
+    if (has("email_addresses")) byRole[role].with_email++;
+    if (has("phone_numbers")) byRole[role].with_phone++;
+  }
+
   const contactPopulation = includedPersons.length > 0
     ? {
+      // The decisive cut. If with_email === n for leaders and 0 for members,
+      // reachability is a role grant rather than a data-quality accident.
+      by_role: byRole,
       email_addresses: populationOf("email_addresses"),
       phone_numbers: populationOf("phone_numbers"),
       addresses: populationOf("addresses"),
