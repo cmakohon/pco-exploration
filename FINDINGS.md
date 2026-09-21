@@ -484,9 +484,19 @@ Two consequences:
   account-squatting risk in a new costume and it should be revisited before real
   churches depend on it.
 
-**`auth.identities.identity_data` does NOT carry the org claims** - `organization_id`
-and `organization_name` are both null there. `/oauth/userinfo` is the only
-source. There is no cheaper path; do not try to optimize it away.
+**`/oauth/userinfo` is the ONLY way to learn which church a token belongs to.**
+Established three separate ways, so stop looking:
+
+- `auth.identities.identity_data` carries neither `organization_id` nor
+  `organization_name` - both null.
+- `/people/v2/me` carries no organization id at all. Not in `attributes`, and
+  **there is no `meta.parent`** on the response - that envelope appears in
+  webhook deliveries, not here. `links.organization` is `null` outright for an
+  ordinary member.
+- `GET /people/v2` is forbidden to non-admins (8.1).
+
+Do not try to optimize the userinfo round trip away. There is nothing to
+optimize it into.
 
 ### 8.3 Authorization belongs inside the decryption query
 
@@ -517,7 +527,34 @@ permissions change, and the service connection carries one human's permissions.
 Fold an admin re-check into the `pg_cron` keepalive (§6) rather than trusting the
 claim made at registration time.
 
-### 8.5 Snags
+### 8.5 Rotation is per connection
+
+Verified with two live connections, one expired by hand and the other left
+alone - asserted against the rows, never the response (5.2):
+
+| | Hope City (expired) | Charlotte Church |
+|---|---|---|
+| `refreshed_at` | 15:55:58 -> **16:01:20** | 15:44:51.357616 -> **identical** |
+| `access_token_id` | **unchanged** | unchanged |
+| `refresh_token_id` | **unchanged** | unchanged |
+
+Both halves matter. Unchanged secret ids on the rotated row prove
+`vault.update_secret` wrote in place rather than minting new secrets (4.8).
+An untouched sibling row - identical to the microsecond - proves refreshing one
+church's token does not reach into another tenant's. The HTTP response cannot
+show you either fact; only the table can.
+
+### 8.6 Two Person attributes that look like permissions and are not
+
+- **`membership`** is free text describing church membership status. The test
+  account reads `"Elder"` while `site_administrator` is `false` and
+  `people_permissions` is `null`. It is a pastoral label, not an authorization
+  signal, and it is the most inviting wrong field on the whole vertex.
+- **`resource_permission_flags`** is an undocumented object. Observed shape:
+  `{"can_access_workflows": false}`. Single-product and not org-wide; do not
+  build a gate on it.
+
+### 8.7 Snags
 
 **Every connection RPC signature changed, and Postgres overloads by signature.**
 `CREATE OR REPLACE` with new parameters leaves the old
@@ -563,13 +600,12 @@ tokens stay in the browser's memory across that round trip. A reload destroys
 them and the resulting failure looks exactly like a permissions bug - which is
 why the Status panel reports `provider_tokens_in_memory`.
 
-### 8.6 Still not tested
+### 8.8 Still not tested
 
 - The orphan reap itself. The guard was verified (a user who already belongs to
   one church is **not** deleted when refused at another), but the deletion path
   needs a brand-new account at an unregistered church who is *not* an admin -
   and an admin is never reaped, by design.
-- Rotation isolation between two connections, and service-connection handover
-  on disconnect.
+- Service-connection handover on disconnect.
 - Hope City remains `migrated_unverified`: it was claimed by the backfill's
   construction and no one who can prove admin rights there has registered it.
