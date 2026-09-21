@@ -1454,7 +1454,10 @@ Ranked by how much the answer changes the design.
 - **`group_type` through the `include` door.** The collection is empty (10.6);
   `can_include` offers it. If the include answers, 9.2's rule generalizes across
   products and the taxonomy is usable.
-- **The administrator's row.** *Run in 12.5, and only half-answered.* Both poles
+- ~~**The administrator's row.**~~ **Fully answered in 13.5:** an administrator
+  reads a group with `mine: false`, so the collection is row-filtered by
+  permission rather than scoped to the caller. The original half-answer, kept
+  because the mechanism it identified was right: *run in 12.5,* Both poles
   agree that `/groups/v2/group_types` returns `200` with **0 rows to a member
   and 1 to an administrator** - so Groups enforces permission by removing rows
   rather than refusing, which is strong corroboration for 10.2. But Charlotte
@@ -1960,6 +1963,11 @@ built-in bucket for groups belonging to no type. Attribute keys are
 
 ### 12.6 An empty church cannot answer a question about rows
 
+> **Answered in section 13.** One group and one event were added to Charlotte
+> Church, making it the first organization here that is both administrable and
+> non-empty. Every item below was settled by that run except the ones needing a
+> group with *members*, which are carried forward to 13.8.
+
 Charlotte Church has **0 groups, 0 events, 0 event instances, 0 resources**. It
 is the right pole for permission questions and the wrong one for behaviour
 questions, and the distinction is worth stating because the probes did not make
@@ -2058,9 +2066,10 @@ than inferred:**
 
 ### 12.9 Still not tested
 
-- **Everything in 12.6** - the behaviour questions that need a church with rows
-  and an administrator's token at the same time. This is now the single biggest
-  gap in the spike, and no organization currently available satisfies both.
+- ~~**Everything in 12.6**~~ **Answered in section 13** - one group and one
+  event at Charlotte Church closed the behaviour questions. What survives is
+  narrower and listed in 13.8: a group with actual *members*, which is the last
+  unexercised path at the administrator pole.
 - **Whether `/calendar/v2/people` enumerates Calendar-permitted people.** If it
   does, capability detection gets a cheap answer after all (12.6).
 - **Whether the service connection can read Groups.** 12.7's table has an
@@ -2076,3 +2085,258 @@ than inferred:**
 - **Whether `default_group_settings` on a group type seeds
   `members_are_confidential`** (12.5), which would make the confidentiality flag
   10.10 flagged as critical a per-type default rather than a per-group choice.
+
+---
+
+## 13. Filters that exclude, and what a calendar event actually is
+
+Charlotte Church with one group and one event in it - the first organization in
+this spike that is both administrable and non-empty. 12.6 predicted that would
+be the unlock and it was.
+
+**Verdict: `can_query_by` is a complete and trustworthy contract**, proven in
+both directions for the first time (13.1). Which makes the member-facing
+Calendar query real rather than hoped-for: `visible_in_church_center` and
+`starts_at` both bite (13.2). And an Event turns out to carry no time at all -
+every date lives on the instance, which PCO materializes, so recurrence never
+needs parsing (13.3).
+
+One thing arrived unasked and is the most operationally dangerous finding here:
+**`updated_at` did not advance when a returned field changed** (13.4).
+
+### 13.1 Declared keys are honoured; undeclared keys are discarded
+
+9.4 and 10.5 established the dangerous half - PCO ignores `where[]` keys it does
+not recognise rather than rejecting them, so a filtered count proves nothing.
+Neither ever established the safe half, and without it "campus_id is ignored"
+was indistinguishable from "no `where` clause does anything at all".
+
+Three filters designed to return **nothing**, each decisive at a church with one
+row:
+
+| Product | Filter | Declared in `can_query_by`? | Baseline | Result | Verdict |
+|---|---|---|---|---|---|
+| Groups | `where[name]=zzz_no_such_group_zzz` | **yes** | 1 | **0** | honoured |
+| Groups | `where[campus_id]=127163` | no | 1 | 1 | discarded |
+| Calendar | `where[starts_at][gte]=2099-01-01` | **yes** | 1 | **0** | honoured |
+| Calendar | `where[visible_in_church_center]=false` | **yes** | 1 | **0** | honoured |
+| Calendar | `where[zz_not_a_real_field]=1` | no | 1 | 1 | discarded |
+
+> **`meta.can_query_by` is the contract. Keys in it work. Keys not in it are
+> thrown away silently, and the response is a 200 carrying the unfiltered
+> set.** Read it at runtime, and never send a `where` key it does not list.
+
+That is now proven in two products, in both directions, with a non-degenerate
+baseline. It is the single most useful operational rule in this file, and it is
+also the most dangerous thing to get wrong: the failure is not an error, it is a
+larger answer than you asked for.
+
+**The positive window proves nothing and the probe now says so.** The window
+`[yesterday, +30 days]` contains the one event, so an honoured filter and a
+discarded one both return 1. Only a filter that should exclude everything can
+separate them - 9.4's lesson, which `pco-campuses` carried as `negative_filter`
+and which both later probes were written without (13.7).
+
+### 13.2 The member-facing calendar query is real
+
+`visible_in_church_center` is not merely an attribute to read after the fact. It
+is a query key, and it bites:
+
+```
+GET /calendar/v2/events?where[visible_in_church_center]=false   → total_count 0
+GET /calendar/v2/events                                          → total_count 1
+```
+
+The one event is `visible_in_church_center: true`, so asking for `false` correctly
+returned nothing. Combined with 13.1, the shape of a workable feature:
+
+```
+GET /calendar/v2/events?where[visible_in_church_center]=true
+GET /calendar/v2/event_instances?where[starts_at][gte]=…&where[starts_at][lte]=…
+```
+
+**The church has already decided what the congregation should see, and that
+decision is filterable.** Mirror it; do not invent a second one. Same rule as
+10.8's `listed` and `members_are_confidential`, arriving independently in a
+third product.
+
+**`visible_in_church_center` is not sufficient on its own.** Calendar runs an
+approval workflow: `approval_status` (`"A"` here), plus `percent_approved` and
+`percent_rejected`, and `approval_status` is itself a query key. A pending event
+flagged visible is still not ready to show anyone. Filter on both.
+
+Also on the event and worth knowing before building a feed: **`description` is
+HTML** (`"<div>\n  This is a public description…\n</div>\n"`) and **`summary` is
+its plain-text twin**. Use the twin, or sanitize. `featured` and `link_only` are
+further display hints, both queryable. `registration_url` is where Registrations
+shows through.
+
+### 13.3 An Event has no time; the instance has two
+
+The Event's complete attribute set:
+
+```
+approval_status  created_at   description  featured    image_url  link_only
+name             percent_approved          percent_rejected       registration_url
+summary          updated_at   visible_in_church_center
+```
+
+**No `starts_at`. No `ends_at`. No date of any kind.** An Event is the series and
+its description; every time lives on `EventInstance`:
+
+```
+all_day_event  church_center_url  compact_recurrence_description  created_at
+ends_at        location           name       published_ends_at
+published_starts_at              recurrence  recurrence_description
+starts_at      updated_at
+```
+
+Four things follow.
+
+**PCO materializes instances, so recurrence never needs parsing.** `recurrence`
+is `"None"`, `recurrence_description` is the English sentence `"Saturday,
+September 26, 2026 from 3:30pm to 4:30pm"`, and `compact_recurrence_description`
+is `"Does not repeat"`. All three are for display. There is no RRULE and none is
+needed - you iterate instances and filter by `starts_at`.
+
+This is the **direct opposite of Groups**, where 10.6 found `schedule` is
+unparseable free text (`"Meets monthly on the second Saturday from 9-11am"`)
+with no materialized twin. A group's rhythm cannot be computed; a calendar
+event's can simply be read. If a feature needs to know when something actually
+happens, Calendar is the product that can answer and Groups is not - which is
+awkward, because Calendar is the one a member cannot reach (12.1).
+
+**Two time pairs exist and the difference is unobserved.** `starts_at` and
+`published_starts_at` are byte-identical here (`2026-09-26T19:30:00Z`), so
+`published_differs_from_actual` is `false`. The natural reading is that
+`starts_at` is the reserved block including setup and teardown while `published_*`
+is what the congregation is shown - but this is a test event with no setup time
+configured, and **that reading is inference, not observation** (13.8). Until it
+is settled, read `published_*` for anything member-facing: if the two never
+differ it costs nothing, and if they do, it is the correct one.
+
+**`location` is free text, and this church put the campus name in it** - `"West
+- 2225 Freedom Dr #4, Charlotte, NC 28208"`. 12.4 concluded that campus locality
+in Calendar can only be a per-church convention, since no campus field, include
+or query key exists. Here is one such convention, in the wild-ish: a campus name
+prefixed onto an address string. It is a test organization the tester configured,
+so it evidences the *mechanism churches are left with* rather than what churches
+typically do. Do not parse it.
+
+**`church_center_url` is per instance** -
+`charlotte-church-544011.churchcenter.com/calendar/event/237390596`. The same
+bridge Groups offers per group (10.6), at instance granularity.
+
+### 13.4 `updated_at` is not a complete change signal
+
+Two runs of the same probe against the same untouched event, minutes apart:
+
+| | Run A | Run B |
+|---|---|---|
+| `approval_status` | `"A"` | `"A"` |
+| `percent_approved` | **`0`** | **`100`** |
+| `updated_at` | `2026-09-21T19:10:51Z` | `2026-09-21T19:10:51Z` |
+
+**A returned field changed and `updated_at` did not move.** Nobody edited the
+event between runs; `percent_approved` is computed, and it settled
+asynchronously after creation.
+
+Whether that is a semantic guarantee PCO is breaking or ordinary eventual
+consistency does not matter to us - the operational consequence is identical:
+
+> **A sync strategy of "poll `where[updated_at][gte]=<last seen>`" will miss
+> changes.** It is the obvious design, `updated_at` is a query key on both
+> events and instances, and it is not sufficient on its own.
+
+Anything caching PCO data needs a periodic full reconcile, not only a watermark
+poll - which is the same conclusion 8.4 and 9.9 reached from a different
+direction, PCO notifying you of nothing when permissions or campuses change.
+Three independent reasons for the same `pg_cron` job now.
+
+### 13.5 The group list is permission-filtered, not caller-scoped
+
+10.2 read `/groups/v2/groups` returning exactly the caller's own two groups as
+"implicitly scoped to the caller", and flagged it as near-certain rather than
+proven. The administrator's row settles it in the other direction:
+
+```
+"list": [{ "id": "3242172", "name": "Test group", "memberships_count": 0, "mine": false }]
+```
+
+**An administrator reading a group they are not a member of.** So the collection
+is not hardcoded to "my groups" - it is row-filtered by permission, and for an
+ordinary member that filter happens to yield only their own. Exactly the
+mechanism 12.5 found on `group_types`, now confirmed on the collection that
+matters.
+
+The practical rule is unchanged from 10.2 and now rests on evidence: **a
+member's token cannot enumerate the church's groups**, so discovery needs the
+service connection. What changes is the reason - not a special-case endpoint,
+but the same silent row filter Groups applies everywhere.
+
+### 13.6 What this means for the product build
+
+**The Calendar feature is buildable and its query is now known.** Service
+connection only (12.1), filtered to `visible_in_church_center=true` and an
+approved `approval_status`, windowed on `starts_at`, reading `published_*` for
+display and `summary` rather than `description`. That is a complete
+specification, which is more than this spike has for anything else.
+
+**Read `can_query_by` at runtime and treat it as the contract** (13.1). A
+hardcoded filter key that PCO later stops declaring does not start failing - it
+starts returning everything. Assert the key is present before sending it, and
+fail loudly if it is missing rather than sending it anyway.
+
+**Never trust a filter test whose filter matches all the data.** Every filter
+this spike has validated needed a case that should return zero. Build that into
+how the product's own integration tests are written, not only into probes.
+
+**Budget for a full reconcile** (13.4). Watermark polling on `updated_at` is
+insufficient, and that is now the third independent reason for scheduled
+reconciliation alongside permission drift (8.4) and campus drift (9.9).
+
+**The rhythm problem is inverted.** Calendar can tell you exactly when things
+happen and members cannot read it; Groups is readable by members and its
+schedule is unparseable prose. A feature that wants "your group meets Tuesday"
+has no clean source: the group's own events (`/groups/v2/groups/{id}/events`,
+readable by a member per 10.6) are the only candidate, and at this church there
+were none to inspect.
+
+### 13.7 Snags
+
+- **Both later probes shipped without a negative filter.** `pco-campuses` has
+  carried `negative_filter` since section 9 precisely because a filter matching
+  your own data proves nothing, and neither `pco-groups` nor `pco-calendar`
+  ported it. Three filter verdicts were confidently wrong across two commits as
+  a result. The lesson is not "remember the negative case" - it is that a probe
+  pattern which has already earned its place belongs in the shared module, not
+  re-derived per probe.
+- **`inconclusive_filter_matches_all` is now a verdict**, because "the filter
+  returned everything and everything matched" had been rendering as `ignored`.
+  A test that cannot fail must say so rather than reporting a pass.
+- **Guard the negative probes on a non-zero baseline.** Excluding everything
+  from an empty collection returns zero either way; the fix in 12.8 for the
+  degenerate baseline applies to the negative case too.
+- **The second run changed a value nobody edited** (13.4), which means probe
+  output is not reproducible even against frozen data. Worth knowing before
+  treating any single run as authoritative.
+
+### 13.8 Still not tested
+
+- **Whether `published_starts_at` ever differs from `starts_at`** (13.3). Needs
+  an event with setup or teardown time configured. Until then the
+  member-facing rule is "use `published_*`" on the strength of its name alone.
+- **A group with actual members**, which is the last unexercised path in
+  `pco-groups` at the administrator pole: the roster read, `include=person`, and
+  whether `/groups/v2/memberships?where[person_id]=<a stranger>` leaks (10.3).
+  Charlotte Church's one group has zero members, so all three are still open -
+  and the leak question is the only one in this file with a security shape.
+- **Whether `/groups/v2/groups/{id}/events` returns anything useful**, now the
+  only candidate source for a group's real meeting times (13.6). Zero events at
+  this church.
+- **`resource_bookings` and the paid tier.** Still zero resources; 11.6's
+  metered half of Calendar has never been observed with data in it.
+- **Whether `approval_status` values beyond `"A"` behave as expected** in the
+  query, and what the other codes are. One event, one status.
+- **Whether `percent_approved` settling is the only field that moves without
+  `updated_at`** (13.4), or whether others do too. One observation, one field.

@@ -39,6 +39,7 @@ import {
   getConnection,
   HttpError,
   introspect,
+  negativeFilterVerdict,
   type PcoProbe,
   pcoProbeWithToken,
   requireUser,
@@ -289,6 +290,11 @@ Deno.serve(handler(async (req) => {
   const instDoc = instProbe.body as Doc;
   const instRows = rowsOf(instDoc);
   const instCanQueryBy = metaList(instDoc, "can_query_by");
+  // Read before the negative probes below, which gate on there being rows to
+  // exclude. Same values as instTotal/eventsTotal further down; named apart so
+  // the ordering dependency is visible rather than implied.
+  const instTotalEarly = totalOf(instDoc);
+  const eventsTotalEarly = eventsTotal;
 
   // Date filtering, without which none of this is usable at scale. PCO's
   // bracket syntax is a guess; both spellings are tried and BOTH are compared
@@ -311,6 +317,37 @@ Deno.serve(handler(async (req) => {
   } else {
     skip("/calendar/v2/event_instances?where[starts_at][gte]=...", "instances not readable");
     skip("/calendar/v2/event_instances?filter=future", "instances not readable");
+  }
+
+  // --- The filters that must EXCLUDE ----------------------------------------
+  //
+  // 9.4's lesson, which pco-campuses carried as `negative_filter` and this
+  // probe was written without. A window the data falls INSIDE returns the same
+  // count whether the filter bites or is thrown away - and at a church with
+  // one event that is every positive window. Only a filter that should return
+  // NOTHING separates them, and it is decisive at n=1, which is exactly the
+  // size of church available.
+  const FAR_FUTURE = "2099-01-01T00:00:00Z";
+  let negDateProbe: PcoProbe | null = null;
+  let negVisibleProbe: PcoProbe | null = null;
+  if (instProbe.ok && (instTotalEarly ?? 0) > 0) {
+    negDateProbe = await probe(
+      `/calendar/v2/event_instances?where[starts_at][gte]=${
+        encodeURIComponent(FAR_FUTURE)
+      }&per_page=5`,
+    );
+  } else {
+    skip(`/calendar/v2/event_instances?where[starts_at][gte]=${FAR_FUTURE}`, "no instances");
+  }
+  // The same trick on the attribute that decides the whole member-facing
+  // feature. The one event here is visible_in_church_center: true, so asking
+  // for false must return zero if the key is honoured.
+  if (eventsProbe.ok && (eventsTotalEarly ?? 0) > 0) {
+    negVisibleProbe = await probe(
+      "/calendar/v2/events?where[visible_in_church_center]=false&per_page=5",
+    );
+  } else {
+    skip("/calendar/v2/events?where[visible_in_church_center]=false", "no events");
   }
 
   // The control, on the collection the date filters were aimed at.
@@ -350,9 +387,13 @@ Deno.serve(handler(async (req) => {
     // filter bites or is thrown away, so nothing here is evidence of either.
     if (instTotal === 0) return "inconclusive_empty_collection";
     if (t < instTotal) return "effective";
-    if (unknownKeysIgnored === true) return "ignored";
+    // A positive window that MATCHES the data is not evidence. Say so rather
+    // than letting the unknown-key control answer a question it was not asked.
+    if (t === instTotal) return "inconclusive_filter_matches_all";
     return "inconclusive";
   }
+
+  // negativeFilterVerdict now lives in _shared/pco.ts - see 13.7.
 
   // --- Campus: the question 10.5 left open ----------------------------------
 
@@ -557,6 +598,20 @@ Deno.serve(handler(async (req) => {
 
     instances: {
       readable: instProbe.ok,
+      // Values, not just keys, for ONE instance. Two time pairs exist on this
+      // resource and nothing observed says which is which: starts_at/ends_at
+      // is presumed the reserved block including setup and teardown, and
+      // published_* what the congregation is shown. A member-facing feature
+      // that reads the wrong pair shows a 7am call time for a 9am service, so
+      // this is settled by comparison rather than by assumption.
+      //
+      // Safe to return: a church calendar names rooms and meetings, and the
+      // pii_note already covers the free-text risk.
+      first_instance: instRows[0]?.attributes ?? null,
+      published_differs_from_actual: instRows[0]
+        ? (instRows[0].attributes?.published_starts_at !==
+          instRows[0].attributes?.starts_at)
+        : null,
       status: instProbe.status,
       error: instProbe.error ?? null,
       total_count: instTotal,
@@ -583,7 +638,26 @@ Deno.serve(handler(async (req) => {
           total_count: dateProbeB ? totalOf(dateProbeB.body as Doc) : null,
           verdict: dateVerdict(dateProbeB, null),
         },
+        // The decisive one. Everything above can only fail to disprove.
+        negative_window: {
+          attempted: Boolean(negDateProbe),
+          from: FAR_FUTURE,
+          status: negDateProbe?.status ?? null,
+          total_count: negDateProbe ? totalOf(negDateProbe.body as Doc) : null,
+          verdict: negativeFilterVerdict(negDateProbe, instTotal),
+        },
       },
+    },
+
+    // Whether the attribute the whole member-facing feature depends on is a
+    // real filter or a decorative one in `can_query_by`.
+    church_center_filter: {
+      attempted: Boolean(negVisibleProbe),
+      asked: "where[visible_in_church_center]=false",
+      baseline_total: eventsTotal,
+      status: negVisibleProbe?.status ?? null,
+      total_count: negVisibleProbe ? totalOf(negVisibleProbe.body as Doc) : null,
+      verdict: negativeFilterVerdict(negVisibleProbe, eventsTotal),
     },
 
     // 10.5's open question, asked of a third product.

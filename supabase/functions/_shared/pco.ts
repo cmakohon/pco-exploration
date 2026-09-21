@@ -366,6 +366,56 @@ export async function pcoProbeWithToken(
   return { path, ok: true, status: res.status, body: await res.json() };
 }
 
+/** Read `meta.total_count` off a probe body, or null. */
+// deno-lint-ignore no-explicit-any
+export function totalCountOf(probe: PcoProbe | null): number | null {
+  const body = probe?.body as any;
+  return body?.meta?.total_count ?? null;
+}
+
+/**
+ * Judge a filter by a request that should have returned NOTHING.
+ *
+ * Lives here, not in a probe, because it has now been forgotten twice.
+ * pco-campuses carried this logic as `negative_filter` from section 9;
+ * pco-groups and pco-calendar were each written without it and each produced
+ * confidently wrong filter verdicts that survived a commit (13.7).
+ *
+ * The reasoning it encodes: PCO discards `where[]` keys it does not recognise
+ * rather than rejecting them (9.4, 10.5, 13.1), so a filter whose criteria
+ * MATCH the data returns the same count whether it was honoured or thrown
+ * away. Only a filter that should exclude everything can tell them apart, and
+ * it is decisive even at a one-row church - which is the size of church this
+ * spike actually has.
+ *
+ * `baseline` must be the unfiltered `total_count` of the same collection.
+ * Zero is not a usable baseline: excluding everything from an empty collection
+ * returns zero whether the key bit or not.
+ */
+export function negativeFilterVerdict(
+  probe: PcoProbe | null,
+  baseline: number | null,
+):
+  | "not_attempted"
+  | "param_rejected"
+  | "inconclusive"
+  | "inconclusive_empty_baseline"
+  | "honoured"
+  | "discarded"
+  | "partially_effective"
+  | `refused_${number}` {
+  if (!probe) return "not_attempted";
+  if (probe.status === 400) return "param_rejected";
+  if (!probe.ok) return `refused_${probe.status}`;
+  if (baseline === null) return "inconclusive";
+  if (baseline === 0) return "inconclusive_empty_baseline";
+  const t = totalCountOf(probe);
+  if (t === null) return "inconclusive";
+  if (t === 0) return "honoured";
+  if (t === baseline) return "discarded";
+  return "partially_effective";
+}
+
 /** Call the PCO API on a connection's behalf. Handles refresh transparently. */
 export async function pcoFetch(
   admin: SupabaseClient,

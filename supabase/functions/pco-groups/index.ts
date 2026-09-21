@@ -26,6 +26,7 @@ import {
   adminClient,
   getConnection,
   HttpError,
+  negativeFilterVerdict,
   type PcoProbe,
   pcoProbeWithToken,
   requireUser,
@@ -203,6 +204,7 @@ Deno.serve(handler(async (req) => {
   const listProbe = await probe("/groups/v2/groups?per_page=100");
   const listDoc = listProbe.body as Doc;
   const groupRows: Doc[] = Array.isArray(listDoc?.data) ? listDoc.data : [];
+  const baseTotalEarly: number | null = listDoc?.meta?.total_count ?? null;
 
   // Union across all rows: a group with a null field still carries the key.
   const groupAttrKeys = [...new Set(groupRows.flatMap((g) => keysOf(g?.attributes)))].sort();
@@ -326,7 +328,7 @@ Deno.serve(handler(async (req) => {
   // The filter question, with the same three-probe structure section 9.4
   // proved is necessary: baseline, control, then the filtered read. The
   // baseline is the group list above.
-  const baseTotal = listDoc?.meta?.total_count ?? null;
+  const baseTotal = baseTotalEarly;
   const canQueryBy: string[] | null = Array.isArray(listDoc?.meta?.can_query_by)
     ? listDoc.meta.can_query_by
     : null;
@@ -345,6 +347,20 @@ Deno.serve(handler(async (req) => {
   const unknownKeysIgnored = controlStatus === 200 && controlTotal !== null && baseTotal !== null
     ? controlTotal === baseTotal
     : null;
+
+  // Everything so far proves what PCO IGNORES. Nothing has yet proved that a
+  // key PCO advertises in can_query_by is honoured - and a `where` clause that
+  // silently does nothing is the same failure either way. `name` is declared,
+  // so a name that cannot match must return zero.
+  const NO_SUCH_NAME = "zzz_no_such_group_zzz";
+  let declaredKeyProbe: PcoProbe | null = null;
+  if (listProbe.ok && (baseTotalEarly ?? 0) > 0) {
+    declaredKeyProbe = await probe(
+      `/groups/v2/groups?where[name]=${NO_SUCH_NAME}&per_page=1`,
+    );
+  } else {
+    skip(`/groups/v2/groups?where[name]=${NO_SUCH_NAME}`, "no groups to exclude");
+  }
 
   const filterCampusId = (gCampusRows[0]?.id ? String(gCampusRows[0].id) : null) ??
     campusIdsOnGroups[0] ?? null;
@@ -554,6 +570,17 @@ Deno.serve(handler(async (req) => {
       campus_relationship_on_group: campusRelPresent,
       distinct_campus_ids_on_groups: campusIdsOnGroups,
       filter: {
+        // Proves a DECLARED key is honoured. Without it, "campus_id is
+        // ignored" is indistinguishable from "no where clause does anything".
+        declared_key_control: {
+          attempted: Boolean(declaredKeyProbe),
+          asked: `where[name]=${NO_SUCH_NAME}`,
+          status: declaredKeyProbe?.status ?? null,
+          total_count: declaredKeyProbe
+            ? ((declaredKeyProbe.body as Doc)?.meta?.total_count ?? null)
+            : null,
+          verdict: negativeFilterVerdict(declaredKeyProbe, baseTotal),
+        },
         control: {
           bogus_key: BOGUS_FILTER_KEY,
           status: controlStatus,
