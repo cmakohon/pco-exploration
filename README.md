@@ -4,6 +4,12 @@ A minimal, working example of a **confidential** OAuth 2.0 application that acts
 on a user's behalf against the Planning Center API, with Supabase (free tier)
 providing both the callback URL and the token store.
 
+> **Building the real product? Start with [FINDINGS.md](FINDINGS.md).**
+> It carries the five-minute setup, every snag hit during this spike with its
+> cause and fix, the testing traps that produce false passes, and what was left
+> untested. This README covers how *this* repo is put together; FINDINGS covers
+> what to carry forward.
+
 ## How the Planning Center auth model works
 
 Everything below is confirmed against the
@@ -199,47 +205,17 @@ the feature is broken.
 
 ## Gotchas found in practice
 
-**supabase-js defaults to the implicit flow, not PKCE.** `DEFAULT_OPTIONS` in
-GoTrueClient sets `flowType: 'implicit'`, so the browser client returns the
-Supabase access token *and* the PCO provider tokens in the URL fragment, where
-they persist in browser history. It also means `?code=` never appears, which
-silently broke the storage gate below. Pass `flowType: 'pkce'` explicitly when
-creating the client — worth doing for the credential handling alone, separately
-from the gate.
+Full list with symptoms, causes and fixes: **[FINDINGS.md § 4](FINDINGS.md)**.
+Kept here only so they are impossible to miss:
 
-**`SIGNED_IN` does not mean "just logged in".** It was observed firing on a hard
-reload of an existing session, because supabase-js persists the session (provider
-tokens included) to localStorage and re-emits on recovery. Gating any write on it
-re-runs that write on every page load. `INITIAL_SESSION` is not the answer either
-— both fire. The reliable signal is `?code=` in the URL, read synchronously at
-module load before supabase-js exchanges it and strips it.
-
-This cost two failed fixes before the page carried a build marker; without one, a
-stale cached page and a logic bug look identical from the database side.
-
-**Supabase sends its own confirmation email on first sign-in.** PCO's discovery
-document advertises exactly these claims:
-
-```
-iss, sub, aud, exp, iat, name, email, organization_id, organization_name
-```
-
-No `email_verified`. Supabase will not treat a provider-supplied email as
-verified unless the provider asserts it, so it falls back to emailing its own
-confirmation link — which must be clicked before the session is usable.
-
-For this spike that is a one-time annoyance. For a real multi-church product it
-is a decision to make deliberately: every user would authenticate with Planning
-Center and *then* be asked to confirm an email address Planning Center already
-verified. Options, roughly in order of preference:
-
-1. Turn off **Confirm email** under Authentication → Sign In / Providers →
-   Email. Reasonable here because the email arrives from PCO's OIDC token rather
-   than from user input, so there is no address-squatting risk to defend against.
-2. Leave it on and design the extra step into the onboarding flow.
-3. Ask Planning Center to add `email_verified` to their claims.
-
-Worth settling before the flow is in front of churches, not after.
+- **supabase-js defaults to `flowType: 'implicit'`**, which returns the Supabase
+  access token and both PCO provider tokens in the URL fragment, where they
+  persist in browser history. Pass `flowType: 'pkce'` explicitly.
+- **`SECURITY DEFINER` functions are granted to `PUBLIC` by default.** Revoke
+  before granting to `service_role`, or the Vault migration exposes every user's
+  tokens to any signed-in caller — worse than the plaintext columns it replaced.
+- **Neither `SIGNED_IN` nor `INITIAL_SESSION` means "just signed in".** Both fire
+  on page load. Detect the OAuth return from the URL instead.
 
 ## Security notes
 
