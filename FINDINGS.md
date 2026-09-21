@@ -1073,13 +1073,13 @@ person's campus needs a refresh path.
   observed.
 - **Whether the include workaround (9.2) generalizes** to other People endpoints,
   or is specific to `/people/v2/me`.
-- **Whether another product's campus endpoint bypasses the People 403.** 9.8
-  establishes that Groups, Giving and Registrations publish the same org-level
-  campus list behind *different* permission models. If an ordinary member has
-  Groups access, `GET /groups/v2/campuses` may answer where People refuses. This
-  is the single highest-value untested hypothesis here, and it needs only the
-  `groups` scope and a reconnect. Note it is a fallback by nature: those products
-  are optional to a church in a way People is not.
+- ~~**Whether another product's campus endpoint bypasses the People 403.**~~
+  **Answered in 10.1: it does.** The same member who gets `403` from
+  `/people/v2/campuses` gets `200` and three campuses from
+  `/groups/v2/campuses`. The caveat written here still holds and is the subject
+  of 10.7 - Groups is optional to a church in a way People is not, so this is a
+  fallback and not a replacement. It also settles the first item above: Hope
+  City runs three campuses, North, West and East.
 - **Whether People Editor or Manager can list campuses.** Undocumented (9.8).
   Needs a second person, or a role change at a church where the tester is an
   administrator.
@@ -1090,3 +1090,376 @@ person's campus needs a refresh path.
   changes - the same silence as 8.4's permission changes. Any cached campus
   scoping goes stale with no signal, which is one more reason for the `pg_cron`
   job in section 6.
+
+---
+
+## 10. Groups: a second permission domain, and the churches that do not have it
+
+Added by `pco-groups`, built to the same rules as `pco-campuses` - read-only,
+non-fatal, every outcome recorded because at this surface a refusal is the
+finding.
+
+Verified live against Hope City Church Charlotte on an **ordinary member's**
+token carrying `openid people groups`. Seventeen probes, **zero refusals**.
+
+**Verdict: Groups answers almost everything People refuses, and belongs to a
+different permission model entirely.** The same person who is
+`directory_status: "no_access"` in People - forbidden the directory, forbidden
+the campus collection, forbidden their own campus by id (9.2) - can read their
+group's full 55-person roster from Groups, with email addresses, phone numbers
+and postal addresses attached. Nothing was negotiated for this; it is simply a
+different product with different rules.
+
+The catch is in the section title. **People is guaranteed and Groups is not.**
+Every PCO church has People, free and unlimited, and cannot use the platform
+without it. Groups is optional, metered, and may hold nothing at all. Section
+10.7 is the line between the two, and it is the section to read if you are
+deciding what to build.
+
+This section also closes the highest-value hypothesis left open by 9.10.
+
+### 10.1 The same token, the two products
+
+| Read | People | Groups |
+|---|---|---|
+| Other people at this church | **403** - directory forbidden (8.1) | **200** - 55 rows, contact details included |
+| The church's campus list | **403** - `CampusVertex` collection (9.2) | **200** - North, West, East |
+| One campus by id | **403** - same vertex, by id (9.2) | not attempted - the list answered |
+| Structural taxonomy | n/a | **200**, and **empty** (10.6) |
+
+One person, one token, one request apart. 9.2 concluded that a campus picker
+needs the church's service connection; for a church that uses Groups, that is
+now false - `GET /groups/v2/campuses` answers it directly.
+
+This is exactly the fallback 9.10 predicted and 9.7 said could only be settled
+by granting the scope. It was, and it does. It also incidentally answers the
+first item in 9.10: **Hope City runs three campuses** - North, West and East -
+a fact a member could not previously learn from their own token.
+
+**Do not read this as "Groups is the way around People's permissions."** It is
+a way around them at churches that use Groups. That is a smaller set, and 10.7
+is the whole reason this section exists.
+
+### 10.2 `/groups/v2/groups` is not the church's groups
+
+```
+"total_count": 2,
+"list": [
+  { "id": "2583839", "name": "West Men's Breakfast",  "memberships_count": 55, "mine": true },
+  { "id": "2771136", "name": "Coulwood Dinner Group", "memberships_count": 12, "mine": true }
+]
+```
+
+A three-campus church does not run two groups, and both rows are the caller's
+own. **The top-level collection is implicitly scoped to the caller's
+memberships** - it is a fourth door to "my groups", not a church directory.
+
+Stated as near-certain rather than proven: the alternative reading is a church
+with exactly two groups, both of which the tester happens to belong to. One run
+from an administrator's row settles it and has not been done (10.10).
+
+The consequence either way is the same, and it is the important one:
+**a member's token cannot enumerate the church's groups.** Any discovery
+feature - browse groups, find a group near me, which groups need help - needs
+the service connection.
+
+### 10.3 Four doors open to "the groups I am in"
+
+Six candidates probed, all `200`, four yielding group ids:
+
+| Request | Returned | Group ids |
+|---|---|---|
+| `/groups/v2/me` | `Person` | 0 |
+| `/groups/v2/me/groups` | `Group` | **2** |
+| `/groups/v2/people/{id}` | `Person` | 0 |
+| `/groups/v2/people/{id}/groups` | `Group` | **2** |
+| `/groups/v2/people/{id}/memberships` | `Membership` | **2** |
+| `/groups/v2/memberships?where[person_id]={id}` | `Membership` | **2** |
+
+- **`/me` sub-paths route here.** They do not in People - 9.6 records
+  `/people/v2/people/{id}/primary_campus` answering `403` where the `include`
+  answered `200`. Another way the two products differ.
+- **A `200` that yields no group ids is still a finding.** `/groups/v2/me`
+  returns a `Person`: the door exists and is not the one you want. Recording the
+  returned `type` is what separates that from an empty result.
+- **The fourth row proves nothing yet.** 10.5 establishes that Groups *ignores*
+  unknown `where[]` keys. If `person_id` is not a real query key on
+  `/groups/v2/memberships`, that collection is answering "your memberships"
+  regardless of the id in the URL - and passing a stranger's id would return
+  your groups, not theirs. Untested, and it is the one open question here with a
+  security shape (10.10).
+
+Use `/groups/v2/me/groups`. It is the cheapest, it needs no person id, and it
+returns `Group` rather than a join row.
+
+### 10.4 The roster is readable, and it carries contact details
+
+`GET /groups/v2/groups/2583839/memberships?per_page=25&include=person`
+
+```
+"total_count": 55,
+"attribute_keys":   ["joined_at", "role"],
+"can_include":      ["person"],
+"included_types":   ["Person"],
+"person_attribute_keys": [
+  "addresses", "avatar_url", "created_at", "email_addresses",
+  "first_name", "gender", "last_name", "permissions", "phone_numbers"
+]
+```
+
+**This is the finding the product turns on.** A member token can read who is in
+their group and how to reach them. No service connection, no administrator, no
+directory permission - the same token that People answers `no_access` to.
+
+Three qualifications, none of them small:
+
+- **Keys are not values.** The probe records attribute names only, by design -
+  this file is in git and a roster is not evidence. Whether
+  `email_addresses` and `phone_numbers` are populated or empty arrays is
+  **unverified** (10.10). It changes the product if they are empty.
+- **Contact details on the Person here are nested arrays**, not the separate
+  `/people/v2/emails` resources People uses. Do not carry a People-shaped reader
+  across.
+- **`members_are_confidential` exists and must be honoured** (10.6). PCO already
+  maintains the flag that says this roster is not for showing.
+
+`includes_caller: false` in the probe output **is a defect, not a finding** -
+it was computed from the five-row redacted sample rather than the twenty-five
+returned, and twenty-five of fifty-five could not settle it either. Ignore the
+field; it is fixed in 10.9.
+
+### 10.5 A group has no campus, and the filter that appears to work does not
+
+Three independent signals, all agreeing:
+
+| Signal | Value |
+|---|---|
+| `relationships` on Group | `["group_type", "location"]` - **no `campus` key at all** |
+| `meta.can_include` | `["enrollment", "group_type", "location"]` - no campus |
+| `meta.can_query_by` | `["archive_status", "name"]` - campus not filterable |
+
+`where[campus_id]=10192` returned `200` and the unchanged baseline, which on its
+own proves nothing - and this is 9.4's lesson arriving in a second product. The
+control probe settles it:
+
+```
+baseline               /groups/v2/groups                            → total_count 2
+control  /groups/v2/groups?where[zz_not_a_real_field]=1             → total_count 2
+filtered /groups/v2/groups?where[campus_id]=10192                   → total_count 2
+```
+
+**Groups ignores unknown `where[]` keys, exactly as People does** (9.4). An
+ignored filter and an effective one return the same `200`, so the filtered count
+is uninterpretable without the control. `can_query_by` says the same thing more
+cheaply and should be consulted first.
+
+Note the baseline here is `2` - the caller's own groups (10.2) - so the count
+comparison was degenerate regardless. `can_query_by` is the load-bearing
+evidence, not the arithmetic.
+
+**So campuses and groups are both visible to a member and nothing joins them.**
+Campus-local routing cannot come from Groups. It has to come from
+`Person.primary_campus_id` - which 9.2 found only through the `include` door -
+or from the group's `location`, which is a physical address rather than a campus
+id. Never from the name, however much "West Men's Breakfast" invites it.
+
+Whether the campus edge is absent from the *API* or merely unset at *this
+church* is not settled by key absence alone at one organization (10.10) - though
+`can_include` omitting campus is the stronger of the two signals, since that
+list is PCO's, not the church's.
+
+### 10.6 What a Group carries, and which of it is a product decision
+
+Full attribute set from `/groups/v2/groups/2583839`:
+
+```
+archived_at            chat_enabled              contact_email
+created_at             description               description_as_plain_text
+direct_messages_enabled  events_listed           events_visibility
+header_image           leaders_can_search_people_database
+listed                 location_type_preference  members_are_confidential
+memberships_count      name                      public_church_center_web_url
+schedule               virtual_location_url
+```
+
+Five of those are decisions rather than data:
+
+- **`members_are_confidential`** (`false` here). The roster flag. Recovery
+  groups, care groups, anything where membership is itself sensitive. Whether
+  setting it actually *blocks* the read of 10.4 or is merely advisory is
+  **untested and is the most important open question in this section** (10.10).
+  If advisory, honouring it is our responsibility, and it belongs in the schema
+  rather than in a template.
+- **`chat_enabled`** and **`direct_messages_enabled`** (both `true`). PCO Groups
+  already ships group chat and direct messages. Do not build chat.
+- **`public_church_center_web_url`**
+  (`hopecityclt.churchcenter.com/groups/groups/west-men-s-breakfast`). A
+  per-group deep link into Church Center. The bridge runs both directions and
+  costs nothing.
+- **`listed`**, **`events_listed`**, **`events_visibility`** (`"members"`).
+  Visibility is per-group and already modelled; mirror it rather than inventing
+  a second scheme that can disagree with PCO's.
+- **`schedule`** is **free text** - `"Meets monthly on the second Saturday from
+  9-11am"`. Unparseable. Anything time-aware must use
+  `/groups/v2/groups/{id}/events`, which is structured (`starts_at`, `ends_at`,
+  `repeating`, `canceled`, `attendance_requests_enabled`) and readable by a
+  member.
+
+**`/groups/v2/group_types` returned `200` with an empty list.** A church cannot
+have zero group types, so this is 9.3's ambiguity in a new place - except that
+here the generous reading is clearly wrong. The likely explanation is 9.2
+repeating itself: the taxonomy is org structure, the collection is shut to a
+member, and `can_include: ["group_type"]` is the only door. Untested (10.10),
+and it decides whether "your group" can distinguish a small group from a serving
+team from a class.
+
+### 10.7 People vs Groups: what every church is guaranteed
+
+The distinction that decides product scope. **People is a floor; Groups is an
+assumption.**
+
+Pricing below is **documentation, not observation** - read off Planning Center's
+pricing page, and kept separate for the same reason 9.8 is.
+
+| | People | Groups |
+|---|---|---|
+| Cost | "Free unlimited database and reporting included" | free tier, metered at **15 group members** |
+| Can a church skip it? | **No.** It is the platform's spine | **Yes**, entirely |
+| Can it be empty? | No - every person is in it | **Yes** - installed with no groups configured |
+| Member's read access | severely limited; `directory_status` gates it (8.6, 9.5) | broad, within their own groups (10.4) |
+| Enumerate the church | never, from a member token | never, from a member token (10.2) |
+| Campus | the authority - `primary_campus` (9.1) | campuses listed, but **not linked to groups** (10.5) |
+
+Four conditions have to hold before a Groups feature has anything to work with,
+and they fail independently:
+
+1. The church uses Groups at all.
+2. Someone has configured groups in it.
+3. **This member is in one.** A church with 200 groups gives a member who joined
+   none exactly the same empty screen as a church with none.
+4. The group is not `members_are_confidential`, or we honour it and behave as
+   though it were empty.
+
+Condition 3 is the one that gets missed. Group adoption is a per-person fact,
+not a per-church one, and the per-church check passes for people the feature
+cannot serve.
+
+**The rule this produces, and it is the same shape as 8.7:** a Groups feature
+degrades to a People feature, never to an error. A church that has not adopted
+Groups is not a broken church, and a member in no group is not a broken member.
+Both must get a product, and neither may be shown a spinner or a 403.
+
+A practical corollary for anything cached: **Groups availability is a
+three-state answer** - has groups / has none / we may not see them - and 10.2
+means a member's token cannot distinguish the second from the third. Only the
+service connection can. Store which one you learned and from whose token.
+
+**Every Groups observation in this section comes from a church that pays for
+Groups** - a 55-member group is four times the free-tier allowance. No free-tier
+Groups church has been observed at all, and whether the 15-member meter is per
+group or per organization is not established (10.10). Either way, a 55-person
+meal train is a paid feature at the church that needs it most.
+
+### 10.8 What this means for the product build
+
+The tiers separate cleanly, and not the way section 9 assumed:
+
+| Tier | Member's own token? | Needs |
+|---|---|---|
+| **My group** - roster, contact, meeting rhythm | **Yes, completely** | `groups` scope and one connection |
+| **My campus** - anything campus-local | No | `primary_campus` via include (9.2) + the cached list (9.9) |
+| **The church** - discovery, every group | No | the service connection |
+
+**Group-tier features survive a lapsed service connection.** That is worth more
+than it first appears. Section 8.7 established that a church whose service
+connection degrades must not become unjoinable; this says the core of a
+group-scoped feature does not even notice. The church's identity is needed for
+discovery and campus work, not for a member reading the group they are already
+in.
+
+**Whatever ships first should be group-scoped.** The API and the adoption
+argument agree: the group tier needs one scope, one token, no background
+identity, and no campus derivation - and it is the tier where the roster is
+small enough to act.
+
+**Campus-local work moves further out** than section 9 implied. 9.9 planned for
+the service connection to serve a campus list; that stands, but 10.5 means
+nothing in Groups can be scoped by campus, so any "at the North campus" feature
+must derive locality from the *person*, one include at a time, or from a group's
+physical `location`.
+
+**Do not build chat, and do not build a group directory.** PCO ships both, free,
+inside the app members already have (10.6).
+
+**Mirror PCO's visibility flags; never invent a parallel scheme.** `listed`,
+`events_visibility` and `members_are_confidential` already encode what a church
+decided. A second scheme that can disagree with the first is a privacy incident
+with a changelog.
+
+### 10.9 Snags
+
+- **The client's `scopes` option silently overrides the dashboard.** Adding
+  `groups` to the provider's Scopes field in Supabase changed nothing:
+  `web/index.html` passed `scopes: "openid people"` to both `signInWithOAuth`
+  and `linkIdentity`, and supabase-js sends what the call says. PCO then issues a
+  token for exactly what was asked, so the failure is **silent** - every
+  `/groups/v2` call returns `401 bad_scope` and reads as a permissions problem
+  rather than as a scope never requested. Now one `PCO_SCOPES` constant, because
+  there are two authorize paths and a scope that differs between them is a bug
+  you find at the second church, weeks later.
+- **Widening the scope does not touch tokens already issued.** An existing
+  connection keeps its grant until the user reconnects. `pco_connection_upsert`
+  takes `p_scope` from introspection, so a plain reconnect updates it in place -
+  no disconnect, no revoke. The probe reports the stored scope **before** probing
+  anything for this reason: "PCO refused us" and "we never asked" are different
+  findings that produce identical 401s.
+- **Re-authorizing an already-approved app can withhold the refresh token.**
+  Already handled by `pco-store-tokens`' 400, and the remedy is still to revoke
+  the app at Planning Center first. Widening a scope is the case most likely to
+  hit it.
+- **`includes_caller` was computed from the redacted sample**, not the returned
+  rows, and reported `false` for a caller who is a member of the group. A field
+  derived from a deliberately-truncated sample cannot answer a question about the
+  whole set. Fixed by computing it over all returned rows and reporting
+  `returned`/`total_count` alongside, so a `false` from page one is legible as
+  inconclusive rather than negative.
+- **The door probes do not record `total_count`**, which is what leaves 10.3's
+  fourth row open. A collection that is implicitly self-scoped and one that
+  honours a filter are the same two rows at this church; only the count over an
+  unfiltered read separates them.
+- **Seventeen PCO calls in one request**, up from nine in 9.6. Still no `429`,
+  still nothing backing off if there were.
+
+### 10.10 Still not tested
+
+Ranked by how much the answer changes the design.
+
+- **Whether `members_are_confidential: true` actually blocks the roster read.**
+  If it is advisory, enforcing PCO's privacy intent becomes our responsibility
+  rather than the platform's. Needs a confidential group to test against.
+- **Whether the contact arrays are populated.** `email_addresses` and
+  `phone_numbers` are present as *keys*; whether they carry values on a group
+  roster is unverified, and the group tier is a different product if they are
+  empty.
+- **Whether `/groups/v2/memberships?where[person_id]=<a stranger>` leaks.** 10.5
+  proves unknown `where[]` keys are ignored, so that collection may be
+  self-scoped and the filter cosmetic - or it may not be self-scoped at all.
+  The only open question here with a security shape.
+- **`group_type` through the `include` door.** The collection is empty (10.6);
+  `can_include` offers it. If the include answers, 9.2's rule generalizes across
+  products and the taxonomy is usable.
+- **The administrator's row.** Every number in this section is a member's. Does
+  an administrator see the church's full group list from `/groups/v2/groups`?
+  Section 8's two-pole comparison is the design this probe was built for and it
+  has only been run at one pole.
+- **A church with Groups installed and no groups configured**, and **a free-tier
+  Groups church.** 10.7's degradation rule is reasoned, not observed; both
+  states are asserted and neither has been seen.
+- **Whether the campus edge is absent from the Groups API or unset at this
+  church.** `can_include` omitting campus is PCO's own statement and is the
+  stronger signal, but one organization is one data point.
+- **Whether a member may read events for a group they are not in**, given
+  `events_visibility: "members"`. Only the caller's own groups were touched.
+- **Writes of any kind.** Nothing in this spike has ever PATCHed or POSTed to
+  PCO. Whether a member token can join a group, or a leader can add a member,
+  is entirely unknown.

@@ -57,6 +57,9 @@ Organization Administrators before its members can link.</p>
 <h2>Campuses</h2>
 <pre id="campuses">—</pre>
 
+<h2>Groups</h2>
+<pre id="groups">—</pre>
+
 <h2>Registration</h2>
 <pre id="register-out">—</pre>
 
@@ -115,6 +118,23 @@ const supabase = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
   },
 });
 const fnUrl = (name) => `${cfg.SUPABASE_URL}/functions/v1/${name}`;
+
+// The scope list the authorize request actually carries.
+//
+// The provider's "Scopes" field in the Supabase dashboard is a DEFAULT, not a
+// ceiling and not an override: supabase-js sends whatever `options.scopes`
+// says, and that wins. Widening the scope in the dashboard while this string
+// stays narrow changes nothing, and it fails SILENTLY - PCO happily issues a
+// token for what was asked, so every downstream 403 reads as a permissions
+// problem rather than as a scope we never requested.
+//
+// Defined once because there are two authorize paths - sign-in and linking -
+// and a scope that differs between them is a bug you find weeks later, at the
+// second church only.
+//
+// Widening it does not touch tokens already issued. An existing connection
+// keeps its old grant until the user disconnects and reconnects.
+const PCO_SCOPES = "openid people groups";
 
 // THE ONE-SHOT TRAP. provider_token and provider_refresh_token exist in the
 // session only immediately after sign-in. Registration needs them AFTER
@@ -331,6 +351,19 @@ function renderChurches() {
     };
     head.append(campusBtn);
 
+    const groupsBtn = document.createElement("button");
+    groupsBtn.className = "small";
+    groupsBtn.textContent = "Groups";
+    groupsBtn.onclick = async () => {
+      show("groups", `Asking Planning Center about groups at ${o.name}…`);
+      // Raw, like Campuses: a 403 body names the vertex PCO refused, and a
+      // scope refusal reads differently from a permission one. Both are the
+      // finding, so neither may be thrown away by callFunction.
+      const res = await callFunctionRaw("pco-groups", { organization_id: o.id });
+      show("groups", { http_status: res.status, ...res.body });
+    };
+    head.append(groupsBtn);
+
     div.append(head);
 
     const detail = document.createElement("div");
@@ -425,7 +458,7 @@ supabase.auth.onAuthStateChange(async (event, session) => {
 $("connect").onclick = () => supabase.auth.signInWithOAuth({
   provider: "custom:planning-center",
   options: {
-    scopes: "openid people",
+    scopes: PCO_SCOPES,
     redirectTo: window.location.origin,
     // PCO recommends select_account so the user can confirm or switch which
     // account (and therefore which church) they are connecting.
@@ -493,7 +526,7 @@ $("link").onclick = async () => {
     const { error } = await supabase.auth.linkIdentity({
       provider: "custom:planning-center",
       options: {
-        scopes: "openid people",
+        scopes: PCO_SCOPES,
         redirectTo: window.location.origin,
         queryParams: { prompt: "select_account" },
       },

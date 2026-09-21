@@ -46,3 +46,6 @@ verify_jwt = false
 
 [functions.pco-campuses]
 verify_jwt = false
+
+[functions.pco-groups]
+verify_jwt = false
