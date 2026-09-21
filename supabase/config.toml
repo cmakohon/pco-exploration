@@ -24,7 +24,7 @@ additional_redirect_urls = ["http://localhost:3000", "http://127.0.0.1:3000"]
 jwt_expiry = 3600
 enable_refresh_token_rotation = true
 
-# All three functions authenticate the caller themselves, via requireUser() in
+# Every function authenticates the caller itself, via requireUser() in
 # _shared/pco.ts. verify_jwt is off because the platform's built-in check runs
 # before the handler and rejects the CORS preflight, which carries no
 # Authorization header. Manual verification is equivalent security with a
@@ -42,4 +42,7 @@ verify_jwt = false
 verify_jwt = false
 
 [functions.org-status]
+verify_jwt = false
+
+[functions.pco-campuses]
 verify_jwt = false

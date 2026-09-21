@@ -54,6 +54,9 @@ Organization Administrators before its members can link.</p>
 <h2>Churches</h2>
 <div id="churches"><pre class="muted">—</pre></div>
 
+<h2>Campuses</h2>
+<pre id="campuses">—</pre>
+
 <h2>Registration</h2>
 <pre id="register-out">—</pre>
 
@@ -79,7 +82,7 @@ if (!cfg?.SUPABASE_URL || !cfg?.SUPABASE_ANON_KEY) {
 
 // Bumped on every edit so the status panel proves which JS the browser ran -
 // otherwise a cached page is indistinguishable from a logic bug.
-const BUILD = "v6";
+const BUILD = "v7";
 
 // "We just came back from Planning Center" - read synchronously at module load,
 // before supabase-js consumes the URL and strips it.
@@ -311,6 +314,23 @@ function renderChurches() {
       };
       head.append(btn);
     }
+
+    // On every row, including the active one: comparing a member's answer with
+    // an administrator's is the whole experiment, and switching active org
+    // between the two halves would make each result attributable to that
+    // switch rather than to the church.
+    const campusBtn = document.createElement("button");
+    campusBtn.className = "small";
+    campusBtn.textContent = "Campuses";
+    campusBtn.onclick = async () => {
+      show("campuses", `Asking Planning Center about ${o.name}…`);
+      // Raw, not callFunction: a 403 body is the evidence, exactly as the
+      // Registration panel treats its 403/409 bodies.
+      const res = await callFunctionRaw("pco-campuses", { organization_id: o.id });
+      show("campuses", { http_status: res.status, ...res.body });
+    };
+    head.append(campusBtn);
+
     div.append(head);
 
     const detail = document.createElement("div");
@@ -559,6 +579,7 @@ $("signout").onclick = async () => {
   show("tokens", "Not signed in yet.");
   show("tenancy", "No decision yet.");
   show("register-out", "—");
+  show("campuses", "—");
   show("result", "—");
   $("churches").innerHTML = '<pre class="muted">—</pre>';
   $("verdict").textContent = "";

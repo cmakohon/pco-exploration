@@ -271,6 +271,46 @@ export async function validAccessToken(
 }
 
 /**
+ * One PCO request, recorded rather than thrown.
+ *
+ * A probe exists to find out what PCO will and will not answer for a given
+ * person, and a 403 is the answer, not a failure. The rule from 8.8 - hard-fail
+ * on contradictory evidence, never on missing evidence - only works if a
+ * refusal can be written down instead of raised.
+ */
+export interface PcoProbe {
+  path: string;
+  ok: boolean;
+  status: number;
+  /** Parsed JSON on success. */
+  body?: unknown;
+  /** PCO's own message on failure, truncated. It names the vertex it refused. */
+  error?: string;
+}
+
+/**
+ * The one place the mandatory User-Agent is attached.
+ *
+ * Everything that talks to the PCO API goes through here. Omit the header and
+ * PCO answers a bare 403 with no explanation, so it must not be possible to add
+ * a second call path that forgets it.
+ */
+async function pcoRequest(
+  accessToken: string,
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  return await fetch(`${PCO_API_BASE}${path}`, {
+    ...init,
+    headers: {
+      ...init.headers,
+      Authorization: `Bearer ${accessToken}`,
+      "User-Agent": userAgent(),
+    },
+  });
+}
+
+/**
  * Call the PCO API with a bare access token.
  *
  * Needed by the registration path, which must ask PCO whether the caller is an
@@ -282,19 +322,48 @@ export async function pcoFetchWithToken(
   path: string,
   init: RequestInit = {},
 ) {
-  const res = await fetch(`${PCO_API_BASE}${path}`, {
-    ...init,
-    headers: {
-      ...init.headers,
-      Authorization: `Bearer ${accessToken}`,
-      "User-Agent": userAgent(), // omit this and PCO answers 403
-    },
-  });
-
+  const res = await pcoRequest(accessToken, path, init);
   if (!res.ok) {
     throw new HttpError(res.status, `PCO ${path} failed: ${await res.text()}`);
   }
   return await res.json();
+}
+
+/**
+ * Ask PCO a question and record whatever comes back, refusals included.
+ *
+ * Never throws. Use this where the shape of the answer is the thing being
+ * discovered. pcoFetchWithToken remains correct anywhere a non-200 means the
+ * request cannot continue - do not replace it with this.
+ */
+export async function pcoProbeWithToken(
+  accessToken: string,
+  path: string,
+): Promise<PcoProbe> {
+  let res: Response;
+  try {
+    res = await pcoRequest(accessToken, path);
+  } catch (err) {
+    // A network-level failure has no status, but it is still evidence rather
+    // than a reason to abandon the remaining probes. The prefix matters: a
+    // transport failure must never be read as a refusal by PCO.
+    return {
+      path,
+      ok: false,
+      status: 0,
+      error: `fetch_failed: ${String(err).slice(0, 480)}`,
+    };
+  }
+
+  if (!res.ok) {
+    return {
+      path,
+      ok: false,
+      status: res.status,
+      error: (await res.text()).slice(0, 500),
+    };
+  }
+  return { path, ok: true, status: res.status, body: await res.json() };
 }
 
 /** Call the PCO API on a connection's behalf. Handles refresh transparently. */
