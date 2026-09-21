@@ -39,6 +39,9 @@
 <h2>Provider token check <span id="verdict"></span></h2>
 <pre id="tokens">Not signed in yet.</pre>
 
+<h2>Capture (token storage)</h2>
+<pre id="capture">Nothing captured yet.</pre>
+
 <h2>Result</h2>
 <pre id="result">—</pre>
 
@@ -58,7 +61,7 @@ if (!cfg?.SUPABASE_URL || !cfg?.SUPABASE_ANON_KEY) {
 
 // Bumped on every edit so the status panel proves which JS the browser ran -
 // otherwise a cached page is indistinguishable from a logic bug.
-const BUILD = "v3";
+const BUILD = "v4";
 
 // The only trustworthy "we just came back from Planning Center" signal.
 // SIGNED_IN is not one: it was observed firing on a hard reload of an existing
@@ -111,17 +114,29 @@ async function captureProviderTokens(session, { store }) {
   $("verdict").textContent = hasRefresh ? "PASS" : (hasAccess ? "FAIL" : "");
 
   // Display only - storing is the caller's decision.
-  if (!store || !hasAccess || !hasRefresh || stored) return;
+  if (!store) {
+    show("capture", `Skipped: not an OAuth return (oauth_return=${OAUTH_RETURN}).`
+      + " Tokens are only stored on the redirect back from Planning Center.");
+    return;
+  }
+  if (!hasAccess || !hasRefresh) {
+    show("capture", "Skipped: Supabase did not supply both provider tokens. "
+      + `provider_token=${hasAccess}, provider_refresh_token=${hasRefresh}`);
+    return;
+  }
+  if (stored) return;
 
+  show("capture", "Storing…");
   try {
     const res = await callFunction("pco-store-tokens", {
       provider_token: session.provider_token,
       provider_refresh_token: session.provider_refresh_token,
     });
     stored = true;
-    show("result", res);
+    show("capture", { stored: true, ...res });
   } catch (err) {
-    show("result", `Store failed: ${err.message}`);
+    // Its own panel, so a later pco-me call cannot overwrite the evidence.
+    show("capture", `STORE FAILED: ${err.message}`);
   }
 }
 
@@ -181,6 +196,7 @@ $("signout").onclick = async () => {
   await supabase.auth.signOut();
   stored = false;
   show("tokens", "Not signed in yet.");
+  show("capture", "Nothing captured yet.");
   show("result", "—");
   $("verdict").textContent = "";
 };
