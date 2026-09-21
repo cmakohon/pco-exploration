@@ -177,10 +177,10 @@ export async function revokeToken(
 }
 
 export async function getConnection(admin: SupabaseClient, userId: string) {
+  // Tokens live in Vault and the vault schema is not exposed through
+  // PostgREST, so this RPC is the only path that decrypts them.
   const { data, error } = await admin
-    .from("pco_connections")
-    .select("*")
-    .eq("user_id", userId)
+    .rpc("pco_connection_get", { p_user_id: userId })
     .maybeSingle();
   if (error) throw new HttpError(500, error.message);
   if (!data) throw new HttpError(404, "No Planning Center connection for this user");
@@ -203,15 +203,14 @@ export async function validAccessToken(
 
   const fresh = await refreshAccessToken(conn.refresh_token);
 
-  const { error } = await admin
-    .from("pco_connections")
-    .update({
-      access_token: fresh.access_token,
-      refresh_token: fresh.refresh_token, // rotated - must be written back
-      expires_at: new Date((fresh.created_at + fresh.expires_in) * 1000).toISOString(),
-      refreshed_at: new Date().toISOString(),
-    })
-    .eq("user_id", userId);
+  // Writes both rotated secrets into Vault in place. The refresh token is
+  // rotated - failing to persist it breaks the chain.
+  const { error } = await admin.rpc("pco_connection_rotate", {
+    p_user_id: userId,
+    p_access: fresh.access_token,
+    p_refresh: fresh.refresh_token,
+    p_expires_at: new Date((fresh.created_at + fresh.expires_in) * 1000).toISOString(),
+  });
   if (error) throw new HttpError(500, `Failed to persist refreshed token: ${error.message}`);
 
   return fresh.access_token;

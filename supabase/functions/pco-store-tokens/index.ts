@@ -49,16 +49,15 @@ Deno.serve(handler(async (req) => {
     ? new Date(info.exp * 1000).toISOString()
     : new Date(Date.now() + 7200 * 1000).toISOString();
 
-  const { error } = await admin.from("pco_connections").upsert({
-    user_id: user.id,
-    pco_person_id: identity.sub,
-    organization_id: identity.organization_id?.toString() ?? null,
-    organization_name: identity.organization_name ?? null,
-    access_token: provider_token,
-    refresh_token: provider_refresh_token,
-    scope: info.scope ?? "",
-    expires_at: expiresAt,
-    refreshed_at: new Date().toISOString(),
+  const { error } = await admin.rpc("pco_connection_upsert", {
+    p_user_id: user.id,
+    p_person_id: identity.sub,
+    p_org_id: identity.organization_id?.toString() ?? null,
+    p_org_name: identity.organization_name ?? null,
+    p_access: provider_token,
+    p_refresh: provider_refresh_token,
+    p_scope: info.scope ?? "",
+    p_expires_at: expiresAt,
   });
   if (error) throw new HttpError(500, error.message);
 

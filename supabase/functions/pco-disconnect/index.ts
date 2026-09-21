@@ -13,10 +13,9 @@ Deno.serve(handler(async (req) => {
   const conn = await getConnection(admin, user.id);
   await revokeToken(conn.refresh_token, "refresh_token");
 
-  const { error } = await admin
-    .from("pco_connections")
-    .delete()
-    .eq("user_id", user.id);
+  // Removes the row and both Vault secrets together; deleting only the row
+  // would orphan two secrets per disconnect.
+  const { error } = await admin.rpc("pco_connection_delete", { p_user_id: user.id });
   if (error) throw new Error(error.message);
 
   return json({ disconnected: true });

@@ -82,6 +82,7 @@ session.provider_token / provider_refresh_token   (once, never stored by Supabas
 | Path | Purpose |
 |---|---|
 | `supabase/migrations/0001_pco_connections.sql` | Token table, RLS-sealed to service_role |
+| `supabase/migrations/0002_tokens_into_vault.sql` | Tokens into Vault + the SECURITY DEFINER RPCs |
 | `supabase/functions/_shared/pco.ts` | Endpoints, refresh, rotation-persisting `pcoFetch` |
 | `supabase/functions/_shared/http.ts` | CORS preflight + error-to-JSON |
 | `supabase/functions/pco-store-tokens/` | Captures the one-shot provider tokens |
@@ -227,10 +228,19 @@ Worth settling before the flow is in front of churches, not after.
   `requireUser()`. The platform's built-in check runs before the handler and
   rejects the CORS preflight, which carries no `Authorization` header; manual
   verification is equivalent security with a working preflight.
-- Tokens are stored in plaintext columns. Fine for a spike; move to Supabase
-  Vault before this holds real churches' data.
+- Tokens are held in Supabase Vault, not in table columns. `pco_connections`
+  stores only `vault.secrets` ids, and the Edge Functions reach them through
+  four `SECURITY DEFINER` RPCs (`pco_connection_get` / `_upsert` / `_rotate` /
+  `_delete`) because the `vault` schema is not exposed through PostgREST.
+  Execute on those is revoked from `PUBLIC`, `anon` and `authenticated` and
+  granted only to `service_role` - without the explicit revoke, PostgreSQL's
+  default grant to `PUBLIC` would let any signed-in caller read every user's
+  tokens through a definer function.
+- What that buys: a database dump, a backup leak, or a browse through the table
+  editor no longer yields usable tokens. What it does not buy: protection from a
+  leaked `service_role` key, which can still call the accessors.
 
 ## Deliberately out of scope
 
-Multi-org handling, webhooks, rate-limit backoff, encryption at rest, and any
+Multi-org handling, webhooks, rate-limit backoff, and any
 actual product feature.
