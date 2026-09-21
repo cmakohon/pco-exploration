@@ -2795,3 +2795,125 @@ everyone" is not buildable on a member's token at any adoption level.
   not touch: the membership collection's scope rule, `role` as a query key,
   `published_starts_at` versus `starts_at`, resource bookings, and the
   `approval_status` value set.
+
+---
+
+## 17. Coverage: what was asked, and what never was
+
+Sixteen sections record what Planning Center answered. None of them records what
+was never asked, and after this much detail the two become hard to tell apart -
+which is the distinction this file insists on everywhere else, applied to itself.
+
+**Three of eleven scopes have been touched.** The member-reachability question
+is settled for those three, and that question is the one that decides the
+product (17.5). The API is not exhausted and should not be described that way.
+
+### 17.1 Scope coverage
+
+| Scope | Status |
+|---|---|
+| `openid` | **Covered** - identity claims, `organization_id`, the id_token (§ 3) |
+| `people` | **Covered** - both poles, campuses, permissions, the Person vertex (§ 8, 9, 11.5) |
+| `groups` | **Covered** - both poles, rosters, roles, meetings, filters, contact population (§ 10, 12–16) |
+| `calendar` | **Covered** - both poles, events, instances, filters, surface map (§ 11–13) |
+| `check_ins` | Never asked |
+| `registrations` | Never asked |
+| `services` | Never asked |
+| `publishing` | Never asked |
+| `giving` | Never asked - and used as the deliberate `bad_scope` control (11.1) |
+| `resources` | Never asked |
+| `home` | Never asked, and not understood |
+| `api` | Never asked, and not understood - it may be a meta-scope |
+
+`giving` must stay ungranted. It is the only unambiguous `bad_scope` sample
+obtainable without un-granting something else (11.1).
+
+### 17.2 Mechanics never exercised
+
+These are not products. They are properties of any integration, and every one
+of them is unknown:
+
+- **Writes. Nothing in this spike has ever POSTed or PATCHed to Planning
+  Center.** Every conclusion in sixteen sections is about reading. Whether a
+  member can create a group event, join a group, RSVP, or update their own
+  record is entirely unknown, and at least one of those changes the product.
+- **Webhooks.** Listed as out of scope since the README's first version, and
+  13.4 has since made it urgent: `updated_at` did not advance when a returned
+  field changed, so watermark polling is insufficient and webhooks are the
+  obvious alternative. Never registered, never received.
+- **Pagination.** `links.next` has never been followed. Every roster
+  observation is page one - 25 of 55 at Hope City (15.4). A per-page default of
+  25 against a 55-row collection is the most ordinary situation imaginable and
+  the code path for it does not exist.
+- **Rate limits.** Requests per invocation have gone 9 → 17 → 31 across three
+  probes. No `429` has ever been seen and **nothing would back off if one
+  arrived.** The absence of an observed limit is not evidence of a generous one;
+  it is evidence of small test churches.
+- **Token expiry in anger.** The 90-day refresh window (§ 3) has never elapsed.
+  Rotation is proven (5.2); expiry is theory.
+
+### 17.3 The sample is two churches and one human
+
+Every finding rests on:
+
+- **One person**, who is `directory_status: no_access` at both organizations
+  (16.2) and an Organization Administrator at exactly one.
+- **Two organizations**: Hope City Church Charlotte, real, three campuses,
+  55-person groups; and Charlotte Church, a test org whose entire population is
+  two accounts the tester created.
+- **No free-tier church**, no church that has Groups installed and unconfigured,
+  and no caller with People directory access.
+
+10.7 reasoned about churches that skip Groups; 12.6 about empty ones. Both were
+reasoned, and neither has been observed. Treat every per-church claim in this
+file as a hypothesis with one or two supporting instances.
+
+### 17.4 The three that could still change the product
+
+Not all eight untouched scopes matter equally. Three do:
+
+1. **`registrations`.** Planning Center Registrations is signup sheets with
+   capacity limits - which is *structurally the meal train*. If a member can
+   read or create a registration, it is either the thing to build on or the
+   thing already occupying the space. This is the highest-value unknown left and
+   it sits directly on top of the wedge.
+2. **`publishing`.** Church Center's custom pages and navigation. The
+   distribution question from the very first conversation - can our product be
+   reached from inside the app members already have - has never been tested.
+   10.6 and 13.3 found deep links running *outward* (`public_church_center_web_url`,
+   `church_center_url`); nothing has tested a link running *inward*. A product
+   nobody can find does not need any of the other sixteen sections.
+3. **Writes** (17.2). Read-only is a finding about this spike, not about the
+   API.
+
+`check_ins` is the fourth: attendance history is what a "who has gone quiet"
+staff dashboard runs on, and 10.8 identified staff outcomes as what actually
+gets bought. Expect it to behave like Calendar - administrator-only - on the
+strength of 12.1.
+
+`services`, `resources` and `home` are likely irrelevant to a member-to-member
+product. `giving` is deliberately excluded.
+
+### 17.5 What is actually settled
+
+The question this spike existed to answer **is** answered, and it is narrower
+than "the API":
+
+> **What can a member's own token reach, and what needs the church's?**
+
+| Product | A member's own token | The service connection |
+|---|---|---|
+| **People** | their own record; their own campus via `include` only (9.2) | the campus list, the directory |
+| **Groups** | their own groups, full rosters, roles, avatars, **meeting times** (15.3) | discovery, enumeration, group types |
+| **Calendar** | **nothing** (12.1) | everything, filtered (13.2) |
+
+And three rules that outrank any particular endpoint:
+
+- **`meta.can_query_by` is the contract.** Keys in it work; keys not in it are
+  discarded silently and you get a larger answer than you asked for (13.1).
+- **Prefer a scoped path over a `where` clause.** A missing path returns `404`;
+  a missing key returns everything (14.1).
+- **PCO lends the graph and keeps the reach.** Identity is readable, contact is
+  not (15.1, 16.1). Build reachability from our own users (15.5).
+
+Everything else in this file is detail underneath those.
