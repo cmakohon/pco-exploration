@@ -347,11 +347,41 @@ Deno.serve(handler(async (req) => {
     if (has("phone_numbers")) byRole[role].with_phone++;
   }
 
+  /**
+   * The `permissions` attribute on the sideloaded Person.
+   *
+   * It has been in `person_attribute_keys` since 10.4 and its VALUE has never
+   * been read. Role is refuted (16.1) and the caller's own directory_status
+   * cannot explain 2-of-25 either - a per-caller rule would produce 0 or 25,
+   * not 2. Whatever varies, varies per subject, and this is the only
+   * subject-level field in the payload that could carry it.
+   *
+   * Distribution and cross-tab only. The values are an enum PCO defines, not
+   * anything personal, but the cross-tab is still reported as counts so that
+   * no individual is ever identifiable as "the reachable one".
+   */
+  const byPermission: Record<string, { n: number; with_email: number }> = {};
+  for (const p of includedPersons) {
+    const attrs = (p?.attributes ?? {}) as Record<string, unknown>;
+    const key = attrs.permissions === null || attrs.permissions === undefined
+      // null and the string "no_access" would be different findings; 11.3
+      // found people_permissions null where 8.6 expected a string.
+      ? `__${String(attrs.permissions)}__`
+      : String(attrs.permissions);
+    const emails = attrs.email_addresses;
+    const hasEmail = Array.isArray(emails) ? emails.length > 0 : Boolean(emails);
+    byPermission[key] ??= { n: 0, with_email: 0 };
+    byPermission[key].n++;
+    if (hasEmail) byPermission[key].with_email++;
+  }
+
   const contactPopulation = includedPersons.length > 0
     ? {
-      // The decisive cut. If with_email === n for leaders and 0 for members,
-      // reachability is a role grant rather than a data-quality accident.
+      // Refuted at Hope City: 0 of 3 leaders reachable, 2 of 22 members.
+      // Kept because a second church could still disagree.
       by_role: byRole,
+      // The remaining candidate for what varies per subject.
+      by_permission: byPermission,
       email_addresses: populationOf("email_addresses"),
       phone_numbers: populationOf("phone_numbers"),
       addresses: populationOf("addresses"),

@@ -2519,7 +2519,13 @@ They are present and empty for 23 of 25 people. Four sections of this file
 treated key presence as the finding; it took counting to see that the arrays
 are there and the data is not.
 
-**The likely explanation is role, and it is not yet confirmed.** The five-row
+**The likely explanation is role, and it is not yet confirmed.**
+
+> **Refuted in 16.1.** Zero of three leaders carry contact details; both
+> reachable people are ordinary members. The reasoning below was built on two
+> leaders appearing in a five-row sample alongside two reachable people, and
+> twenty-five rows destroyed it. Kept as written because the mistake is
+> instructive - the hypothesis is stated below exactly as it was believed. The five-row
 membership sample carries exactly two `leader`s, and exactly two people carry
 contact details. If those are the same two, PCO is not failing to have the
 data - it is deliberately exposing the people a member is *meant* to be able to
@@ -2647,11 +2653,17 @@ recipients. That is a more defensible product than broadcasting to 55 people,
 and it would mean PCO's redaction pushed us somewhere good. Confirm before
 designing on it.
 
+> **It did not hold** (16.1), and routing to leaders survives regardless:
+> `role` is readable on the membership row, so leaders are identifiable even
+> though PCO will not say how to reach them. Target with the PCO graph, deliver
+> from our own users - 16.3.
+
 ### 15.6 Still not tested
 
-- **Whether contact presence tracks `role`.** The measurement is deployed and
-  unrun. It decides between "route through leaders" and "there is no route",
-  which are different products (15.1).
+- ~~**Whether contact presence tracks `role`.**~~ **Answered in 16.1: it does
+  not**, and the cut runs the other way - 0 of 3 leaders, 2 of 22 members.
+  Routing to leaders survives anyway as a *targeting* decision, since `role` is
+  readable on the membership row even though contact is not (16.3).
 - **Whether contact visibility instead tracks the caller's `directory_status`.**
   The tester is `no_access` at both churches, so every contact observation in
   this file comes from a caller with no People directory permission. A caller
@@ -2668,3 +2680,118 @@ designing on it.
 - **Everything carried forward from 13.8 and 14.3** that these runs did not
   touch: `published_starts_at` versus `starts_at`, resource bookings and the
   paid tier, and the `approval_status` value set.
+
+---
+
+## 16. The role hypothesis was wrong, and the design does not care
+
+The role cut from 15.1, run at Hope City.
+
+**Verdict: refuted, and inverted.** Reachability is not a leader grant. It is
+not explained by the caller's permission either, and what remains is a
+per-subject property this spike has not identified.
+
+**The product design from 15.5 is unchanged**, which is the more useful half of
+this section (16.3).
+
+### 16.1 Zero of three leaders
+
+```
+by_role: {
+  leader: { n: 3,  with_email: 0,  with_phone: 0 },
+  member: { n: 22, with_email: 2,  with_phone: 2 }
+}
+```
+
+15.1 reasoned that the two people carrying contact details were probably the
+two leaders visible in the five-row sample, and that PCO was deliberately
+exposing the people a member is meant to be able to contact. It was a tidy
+story and it is false. **Not one of the three leaders on the page is
+reachable**, and both reachable people are ordinary members.
+
+The coincidence that produced the hypothesis - two leaders in the sample, two
+people with email - was exactly that. The sample is the first five rows; the
+cross-tab is all twenty-five. A five-row sample suggested a pattern that
+twenty-five rows destroyed, which is the same lesson as 10.9's `includes_caller`
+defect arriving in the reasoning rather than in the code.
+
+### 16.2 It is not the caller either
+
+The alternative 15.6 raised was that contact visibility tracks the *caller's*
+`directory_status`, which is `no_access` at both churches and has never been
+varied.
+
+**Arithmetic rules it out as a complete explanation.** A rule that depends only
+on the caller produces the same answer for every subject: 0 of 25, or 25 of 25.
+It produced 2 of 25. Something varies **per subject**.
+
+What is left, unresolved:
+
+- **A per-person privacy or sharing setting** in Planning Center, chosen by the
+  individual or set by the church. The most likely candidate and the one that
+  would generalise worst for us - it means reachability is a property of each
+  congregant's own choices, not of our integration or our permissions.
+- **The `permissions` attribute on the sideloaded Person**, which has sat in
+  `person_attribute_keys` since 10.4 and whose value has never been read. It is
+  the only subject-level field in the payload that could carry this. The probe
+  now cross-tabs it (16.4).
+- **Data quality.** The church may simply not hold emails for most of this
+  group. Hard to credit at a 55-person group in a church that communicates, but
+  not excluded, and Church Center push notifications would let a church operate
+  without them.
+- **A caller-subject relationship** - household, prior contact, mutual group.
+  Untestable from one caller.
+
+Note the caller's own `directory_status` still cannot be dismissed as a
+*factor*; it is only excluded as the *whole* explanation. A caller with
+directory access might see 25 of 25. That test needs a different person and has
+never been possible here.
+
+### 16.3 The design does not depend on the answer
+
+15.5 concluded that reachability should come from our own users rather than
+from Planning Center: everyone who signs in arrives through PCO OAuth carrying
+an email, the overlap is everyone who joined, and the gap is exactly the people
+we have no standing to contact.
+
+**That conclusion is untouched by this section**, and the fact that it survived
+the hypothesis being refuted is the strongest evidence so far that it is the
+right design. It never depended on knowing *why* PCO withholds contact details,
+only that it does - which 15.1 established and 16.1 has now failed to explain
+without changing.
+
+One thing genuinely changes, and it is a gain rather than a loss:
+
+> **Leaders are identifiable but not reachable.** `role` is an attribute on the
+> membership row (`joined_at`, `role`), readable by an ordinary member. So
+> "route this need to the group's leaders" works perfectly well as a
+> **targeting** decision. Only the delivery has to come from our own user
+> table.
+
+15.5 floated routing through leaders as a contingent bonus if the role
+hypothesis held. It holds anyway, for a different reason: the roster tells us
+who the leaders *are* even though PCO will not tell us how to reach them. That
+is the graph-versus-reach split of 15.5 applied one level down, and it works.
+
+**What does not survive:** any feature that needs to contact a congregant who
+has not joined our product. There is no path, it does not depend on permissions
+we could request, and it should not be designed around. A church-wide "notify
+everyone" is not buildable on a member's token at any adoption level.
+
+### 16.4 Still not tested
+
+- **The `permissions` value on the sideloaded Person.** Deployed and unrun. It
+  is the last untouched field in the payload and the only remaining
+  subject-level candidate (16.2). Worth one run; the design does not wait on it.
+- **A caller who has People directory access.** Every contact observation in
+  this file comes from `directory_status: no_access`. 16.2 excludes the caller
+  as the whole story, not as a factor.
+- **A second church.** `by_role` is kept in the probe despite being refuted at
+  Hope City, because one church refuting a pattern is not the same as the
+  pattern being absent everywhere.
+- **The other 30 roster rows.** Still only the first page of 55; `links.next`
+  has never been followed anywhere in this spike (15.6).
+- **Everything carried forward from 13.8, 14.3 and 15.6** that these runs did
+  not touch: the membership collection's scope rule, `role` as a query key,
+  `published_starts_at` versus `starts_at`, resource bookings, and the
+  `approval_status` value set.
