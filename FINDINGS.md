@@ -3007,9 +3007,9 @@ count had hidden since 15.2:
   one the Group doors use.
 
 **Working rule, one caller at one church:** the Membership doors return the
-caller's memberships **in groups they lead**, plus rows in groups that no
-longer resolve. Plain-member rows are not there. Stated as a hypothesis - it
-fits every row observed, and it rests on one leader row.
+caller's memberships **in groups they lead or led**. Plain-member rows are not
+there. Stated as a hypothesis - it fits every row observed, and it rests on
+two leader rows, one live and one in an ended group (18.4).
 
 ### 18.3 The 23, probably
 
@@ -3036,10 +3036,16 @@ yet tested from a caller who leads nothing.
 `403` permission refusal (9.7's distinction). A Membership door still returns
 the caller's row in it, `35824675`, the oldest of the caller's membership ids.
 
-The most likely reading is a group the caller once belonged to (probably led)
-that has since been archived or deleted. `archive_status` is a declared query
-key on `/groups/v2/groups` (can_query_by, every run), so one request settles
-archived versus deleted, and it has not been made (18.8).
+**Confirmed by the tester: a group they led at Hope City that has since
+ended.** So both rows on the Membership doors are groups the caller led, one
+live and one ended - which is what moves 18.2's rule from one leader row to
+two.
+
+Whether "ended" means archived or deleted in Groups is still not known.
+`archive_status` is a declared query key on `/groups/v2/groups` (can_query_by,
+every run), so one request settles it, and it has not been made (18.8). The
+`404` on the group's own detail suggests a member cannot read an ended group
+by id either way.
 
 Either way: **a door that returns rows in groups that 404 is not a list of
 groups the caller is in.**
@@ -3103,8 +3109,9 @@ as the leading candidate (16.2). 16.3's design already does not depend on it.
 
 ### 18.8 Still not tested
 
-- **Archived or deleted.** `GET /groups/v2/groups?where[archive_status]=only`
-  would show whether 2453651 is archived. One request.
+- **Archived or deleted.** 2453651 is confirmed as a group the tester led
+  that has ended (18.4); `GET /groups/v2/groups?where[archive_status]=only`
+  would show whether Groups calls that archived. One request.
 - **The Membership doors' rule from a second caller** - especially one who
   leads nothing (expect 0 on both) and one who is a plain member at a church
   where the tester is not.
