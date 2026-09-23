@@ -104,6 +104,16 @@ function groupIdsFrom(doc: Doc): string[] {
   return [...new Set(ids.filter((x): x is string => Boolean(x)))];
 }
 
+/** Membership row ids in a response that belong to the given person. */
+function selfMembershipIdsFrom(doc: Doc, personId: string | null): string[] {
+  if (!personId) return [];
+  const rows: Doc[] = Array.isArray(doc?.data) ? doc.data : [];
+  return rows
+    .filter((r) => /membership/i.test(String(r?.type ?? "")))
+    .filter((r) => String(r?.relationships?.person?.data?.id ?? "") === personId)
+    .map((r) => String(r?.id));
+}
+
 Deno.serve(handler(async (req) => {
   const admin = adminClient();
   const user = await requireUser(req, admin);
@@ -163,6 +173,7 @@ Deno.serve(handler(async (req) => {
   // --- Q2. Which groups am I in? --------------------------------------------
 
   const doors: Array<Record<string, unknown>> = [];
+  const doorIds = new Map<string, string[]>();
   let myGroupIds: string[] = [];
   let myGroupsSource: string | null = null;
 
@@ -187,8 +198,17 @@ Deno.serve(handler(async (req) => {
           : ((p.body as Doc)?.data?.type ?? null))
         : null,
       group_ids: ids.length,
+      // Which groups, not just how many. After a join at Hope City the Group
+      // doors said 3 and the Membership doors said 2; a count cannot say
+      // which group went missing, or that it is the same one on both.
+      group_id_list: ids,
+      // The caller's own Membership rows, by id. Compared against the row
+      // found in the group's own roster below: same person, same group, two
+      // different collections.
+      self_membership_ids: p.ok ? selfMembershipIdsFrom(p.body as Doc, personId) : [],
       detail: p.ok ? null : (p.error ?? "").slice(0, 200),
     });
+    doorIds.set(path, ids);
     if (!myGroupsSource && ids.length > 0) {
       myGroupIds = ids;
       myGroupsSource = path;
@@ -511,6 +531,94 @@ Deno.serve(handler(async (req) => {
     ? (eventsProbe!.body as Doc).data
     : [];
 
+  // --- Group doors vs Membership doors --------------------------------------
+
+  // After joining a request-to-join group at Hope City, /me/groups and
+  // /people/{id}/groups said 3 while /people/{id}/memberships - the door 15.2
+  // recommended - still said 2, on two runs. Either the Membership index lags
+  // the Group one, or something about the new group hides the caller's row.
+  // For each group, read its settings, its own roster, and its enrollment
+  // rules.
+  const membershipDoorIds = new Set(
+    [...doorIds.entries()]
+      .filter(([path]) => /memberships/.test(path))
+      .flatMap(([, ids]) => ids),
+  );
+  const unmatchedGroupIds = myGroupIds.filter((id) => !membershipDoorIds.has(id));
+
+  // The first run of this block showed the gap runs both ways: the Membership
+  // doors also name a group (2453651) that no Group door returns, and agree
+  // with the Group doors on one group only by id. So check the union - every
+  // group either family names - and for each, whether the caller's row in
+  // the group's own roster is the same row the Membership doors returned.
+  const selfIdsOnMembershipDoors = new Set(
+    doors
+      .filter((d) => /memberships/.test(String(d.path)))
+      .flatMap((d) => d.self_membership_ids as string[]),
+  );
+  const crosscheckIds = [...new Set([...myGroupIds, ...membershipDoorIds])];
+
+  const membershipCrosscheck: Array<Record<string, unknown>> = [];
+  for (const gid of crosscheckIds) {
+    const detail = await probe(`/groups/v2/groups/${gid}`);
+    const a = (detail.body as Doc)?.data?.attributes ?? {};
+
+    // per_page=100 so a small group's roster is one whole page and "my row is
+    // absent" is conclusive rather than "not on page one" (15.4).
+    const roster = await probe(`/groups/v2/groups/${gid}/memberships?per_page=100`);
+    const rows: Doc[] = Array.isArray((roster.body as Doc)?.data) ? (roster.body as Doc).data : [];
+    const rosterTotal: number | null = (roster.body as Doc)?.meta?.total_count ?? null;
+    const mine = rows.find((m) =>
+      personId && String(m?.relationships?.person?.data?.id ?? "") === personId
+    );
+
+    const enrollment = await probe(`/groups/v2/groups/${gid}/enrollment`);
+
+    membershipCrosscheck.push({
+      group_id: gid,
+      in_group_doors: myGroupIds.includes(gid),
+      in_membership_doors: membershipDoorIds.has(gid),
+      detail_status: detail.status,
+      detail_why: classify(detail),
+      detail_error: detail.ok ? null : (detail.error ?? "").slice(0, 200),
+      // Group names are church structure and already kept elsewhere; this is
+      // the only way to recognise a group no Group door will list.
+      name: a.name ?? null,
+      members_are_confidential: a.members_are_confidential ?? null,
+      memberships_count: a.memberships_count ?? null,
+      listed: a.listed ?? null,
+      archived_at: a.archived_at ?? null,
+      roster: {
+        status: roster.status,
+        why: classify(roster),
+        total_count: rosterTotal,
+        returned: rows.length,
+        page_is_whole_collection: rosterTotal !== null && rows.length >= rosterTotal,
+        // The caller's own row only. Role and join time are the caller's own
+        // data; nobody else's attributes leave this block.
+        caller_row: mine
+          ? {
+            membership_id: String(mine.id),
+            role: (mine.attributes ?? {}).role ?? null,
+            joined_at: (mine.attributes ?? {}).joined_at ?? null,
+            // Same row, or the same group reached by a different row?
+            also_on_membership_doors: selfIdsOnMembershipDoors.has(String(mine.id)),
+          }
+          : null,
+        error: roster.ok ? null : (roster.error ?? "").slice(0, 200),
+      },
+      // Group configuration, not personal data - kept verbatim so the value
+      // set (strategy, status) is on record the first time it is seen.
+      enrollment: {
+        status: enrollment.status,
+        why: classify(enrollment),
+        type: (enrollment.body as Doc)?.data?.type ?? null,
+        attributes: (enrollment.body as Doc)?.data?.attributes ?? null,
+        error: enrollment.ok ? null : (enrollment.error ?? "").slice(0, 200),
+      },
+    });
+  }
+
   // --- One word for the FINDINGS table cell ---------------------------------
 
   let verdict: string;
@@ -585,6 +693,11 @@ Deno.serve(handler(async (req) => {
       // none. Do not collapse them.
       no_door_opened: myGroupsSource === null,
       doors,
+      // Groups the Group doors return and the Membership doors do not, and
+      // the reverse. The crosscheck below covers the union of both families.
+      membership_door_gap: unmatchedGroupIds,
+      group_door_gap: [...membershipDoorIds].filter((id) => !myGroupIds.includes(id)),
+      membership_crosscheck: membershipCrosscheck,
     },
 
     // Q3a

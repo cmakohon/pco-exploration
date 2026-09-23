@@ -274,5 +274,6 @@ one human may belong to several, and the admin gate decides who may claim one.
 See [FINDINGS § 8](FINDINGS.md).
 
 Rate-limit backoff is the one that is starting to matter: the probes issue 9,
-17 and 31 PCO requests per invocation respectively, no `429` has been seen yet,
+18 + 3 per group (30 at Hope City) and 31 PCO requests per invocation
+respectively, no `429` has been seen yet,
 and nothing would back off if one arrived.

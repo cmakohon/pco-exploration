@@ -1200,6 +1200,10 @@ Six candidates probed, all `200`, four yielding group ids:
   > two, at a church where the named person holds one. Use the path form,
   > `/groups/v2/people/{id}/memberships`.
 
+  > **Reversed in 18.2.** The path form is not a safe substitute either. At
+  > Hope City it returns only the groups the caller *leads*, plus a row in a
+  > group that no longer resolves. Use `/groups/v2/me/groups`, below.
+
 Use `/groups/v2/me/groups`. It is the cheapest, it needs no person id, and it
 returns `Group` rather than a join row.
 
@@ -2571,6 +2575,11 @@ the `where` clause.** `/groups/v2/people/{id}/memberships` returned exactly `2`
 at Hope City and exactly `1` at Charlotte - correct at both poles, both times,
 while the query form was wrong at both.
 
+> **Wrong in 18.2.** The count was right and the groups were not. At Hope City
+> the two rows were one group the caller leads and one group that returns
+> `404`; both groups where the caller is a plain member were absent. The 23 is
+> most likely every membership row in the groups the caller leads (18.3).
+
 ### 15.3 A member can read their group's meetings, and they are structured
 
 `GET /groups/v2/groups/2583839/events` returns **5 events** on an ordinary
@@ -2669,9 +2678,8 @@ designing on it.
   this file comes from a caller with no People directory permission. A caller
   with directory access might see all 55. This is the alternative explanation
   for 15.1 and it has never been varied.
-- **What scopes `/groups/v2/memberships`.** 23 at Hope City, unexplained (15.2).
-  Capturing that collection's own `meta.can_query_by` and `can_include` is the
-  obvious next probe and was never taken.
+- ~~**What scopes `/groups/v2/memberships`.**~~ **Probably answered in 18.3:**
+  memberships in groups the caller leads. One caller, one church.
 - **Whether `role` is queryable on memberships**, which is what "fetch this
   group's leaders" needs as a single request rather than a scan.
 - **The remaining page of the roster.** Only the first 25 of 55 were ever
@@ -2780,9 +2788,9 @@ everyone" is not buildable on a member's token at any adoption level.
 
 ### 16.4 Still not tested
 
-- **The `permissions` value on the sideloaded Person.** Deployed and unrun. It
-  is the last untouched field in the payload and the only remaining
-  subject-level candidate (16.2). Worth one run; the design does not wait on it.
+- ~~**The `permissions` value on the sideloaded Person.**~~ **Answered in 18.6:
+  it does not explain reachability either.** Both reachable people are plain
+  `member`; none of five people with a higher permission carries an email.
 - **A caller who has People directory access.** Every contact observation in
   this file comes from `directory_status: no_access`. 16.2 excludes the caller
   as the whole story, not as a factor.
@@ -2837,6 +2845,11 @@ of them is unknown:
   Center.** Every conclusion in sixteen sections is about reading. Whether a
   member can create a group event, join a group, RSVP, or update their own
   record is entirely unknown, and at least one of those changes the product.
+
+  > **Partly observed in § 18** - from the read side only. A join made in
+  > Church Center (request, then leader approval) was watched through this
+  > spike's reads. Nothing here wrote it; whether a member's *API* token can
+  > join a group is still unasked.
 - **Webhooks.** Listed as out of scope since the README's first version, and
   13.4 has since made it urgent: `updated_at` did not advance when a returned
   field changed, so watermark polling is insufficient and webhooks are the
@@ -2912,8 +2925,197 @@ And three rules that outrank any particular endpoint:
 - **`meta.can_query_by` is the contract.** Keys in it work; keys not in it are
   discarded silently and you get a larger answer than you asked for (13.1).
 - **Prefer a scoped path over a `where` clause.** A missing path returns `404`;
-  a missing key returns everything (14.1).
+  a missing key returns everything (14.1). **But a scoped path can still be
+  scoped by something you did not ask for** - `/people/{id}/memberships` is
+  (18.2). Check it against a second door before trusting it.
 - **PCO lends the graph and keeps the reach.** Identity is readable, contact is
   not (15.1, 16.1). Build reachability from our own users (15.5).
 
 Everything else in this file is detail underneath those.
+
+---
+
+## 18. Joining a group, and the membership doors that never agreed
+
+The first time anything in this spike has watched a change *happen* rather
+than read a steady state. The tester requested to join **Hope City
+Entrepreneurs** (3091722) in Church Center, a leader approved it, and
+`pco-groups` ran before and after. Five runs on one token, all at Hope City,
+all `directory_status: no_access`.
+
+Nothing here wrote to Planning Center. The join was a person using Church
+Center; this spike only watched it through reads (17.2).
+
+**Verdict: the Group doors saw the join immediately and the Membership doors
+never saw it - and had never seen the caller's ordinary memberships at all.**
+Chasing the discrepancy overturned 15.2's recommendation, and most likely
+explains the 23 that 15.2 could not.
+
+### 18.1 What the join changed
+
+| Door | Before | After approval |
+|---|---|---|
+| `/groups/v2/me/groups` | 2 | **3** |
+| `/groups/v2/people/{id}/groups` | 2 | **3** |
+| `/groups/v2/groups` (member's list, 10.2 / 13.5) | 2 | **3** |
+| `/groups/v2/people/{id}/memberships` | 2 | 2 |
+| `/groups/v2/memberships?where[person_id]=…` | 23 | 23 |
+| `/people/v2/me` | - | not expected to change, not re-read |
+
+- **No lag on the Group side.** The first run after approval already showed 3,
+  and the group's own roster carried the caller's row with
+  `joined_at: 2026-09-23T16:45:26Z`.
+- **`/groups/v2/groups` grew by exactly the joined group.** That is 10.2's
+  "the member's list is their own groups" observed as a change rather than
+  inferred from a snapshot, and it retires the "church with exactly two groups"
+  alternative for good.
+- **The Membership doors did not move** across three further runs, including
+  one after the tester followed the "you were added" email into Church Center.
+- **The pending state was never observed.** Approval came before an
+  intermediate run, so whether a request-to-join is visible to the requester's
+  token while pending is still unknown (18.8).
+
+### 18.2 The Membership doors name different groups, not fewer
+
+Recording the group ids behind each door, not just counts, showed what the
+count had hidden since 15.2:
+
+| Group | Caller's role | Group doors | Membership doors | Group detail |
+|---|---|---|---|---|
+| 2583839 West Men's Breakfast | member | ✅ | ❌ | 200 |
+| 3091722 Hope City Entrepreneurs | member | ✅ | ❌ | 200 |
+| 2771136 Coulwood Dinner Group | **leader** | ✅ | ✅ | 200 |
+| 2453651 | - | ❌ | ✅ | **404** |
+
+- **15.2 was right by coincidence.** `/people/{id}/memberships` said 2 and the
+  caller was in 2 groups - a different 2. The door has never returned the
+  caller's Hope City groups correctly, before this join or after it.
+- **Not lag.** West Men's Breakfast was joined `2025-11-14`, ten months
+  earlier, and is absent.
+- **Not `members_are_confidential`.** It is `false` on every readable group
+  here.
+- **The rows exist; the door does not return them.** Read from each group's
+  own roster (whole pages, `per_page=100`), the caller's rows are
+  `46717894` (West Men's) and `54953667` (Entrepreneurs). Neither id appears
+  on either Membership door. The Membership doors return `43661370` and
+  `35824675`.
+- **Where the two agree, they agree exactly.** Coulwood's roster row for the
+  caller is `43661370`, the same id the Membership doors return
+  (`also_on_membership_doors: true`). It is the one group the caller leads.
+- **Both Membership doors return the same two self rows**, the path and the
+  `where` form alike. They behave as two views of one scope, distinct from the
+  one the Group doors use.
+
+**Working rule, one caller at one church:** the Membership doors return the
+caller's memberships **in groups they lead**, plus rows in groups that no
+longer resolve. Plain-member rows are not there. Stated as a hypothesis - it
+fits every row observed, and it rests on one leader row.
+
+### 18.3 The 23, probably
+
+15.2 found `/groups/v2/memberships` answering 23 at Hope City - neither the
+caller's 2 nor the 67 in their groups - and recorded it as unexplained. If the
+collection is "memberships in groups the caller leads":
+
+```
+Coulwood Dinner Group (leader)   12
+2453651 (404)                    11   <- inferred, never observed
+                                 --
+                                 23
+```
+
+The arithmetic closes, but only through a number this spike has not seen.
+It is consistent with 14.1 at Charlotte Church, where an administrator saw
+every membership in the church: administrators see all rows, leaders see
+their groups' rows, and a plain member sees none beyond what they lead. Not
+yet tested from a caller who leads nothing.
+
+### 18.4 A group that is gone, still holding a membership
+
+`2453651` answers `404` on detail, roster and enrollment - `not_found`, not a
+`403` permission refusal (9.7's distinction). A Membership door still returns
+the caller's row in it, `35824675`, the oldest of the caller's membership ids.
+
+The most likely reading is a group the caller once belonged to (probably led)
+that has since been archived or deleted. `archive_status` is a declared query
+key on `/groups/v2/groups` (can_query_by, every run), so one request settles
+archived versus deleted, and it has not been made (18.8).
+
+Either way: **a door that returns rows in groups that 404 is not a list of
+groups the caller is in.**
+
+### 18.5 Enrollment, first values seen
+
+`GET /groups/v2/groups/{id}/enrollment` is readable by a member for their own
+groups and returns an `Enrollment`:
+
+| Group | `strategy` | `status` | `listed` |
+|---|---|---|---|
+| West Men's Breakfast | `request_to_join` | `open` | `true` |
+| Hope City Entrepreneurs | `request_to_join` | `open` | `true` |
+| Coulwood Dinner Group | `closed` | `private` | `false` |
+
+Also present, all unset on these three: `member_limit`, `date_limit`, their
+`_reached` flags, `auto_closed`, `auto_closed_reason`. Two
+`strategy`/`status` pairs observed; the full value set is not known.
+
+`request_to_join` is what Church Center showed as "Request to join" - the API
+and the UI name the same setting.
+
+### 18.6 `permissions` does not explain reachability either
+
+16.4 left one subject-level field unread. The same runs counted it against
+email presence on the West Men's first page:
+
+```
+by_permission: {
+  member:             { n: 20, with_email: 2 },
+  leader:             { n: 2,  with_email: 0 },
+  administrator:      { n: 2,  with_email: 0 },
+  group_type_manager: { n: 1,  with_email: 0 }
+}
+```
+
+Both reachable people are plain `member`. None of the five people with a
+higher Groups permission carries an email. The last field in the payload that
+could have explained 15.1 does not, which leaves a per-person sharing setting
+as the leading candidate (16.2). 16.3's design already does not depend on it.
+
+### 18.7 What this means for the product build
+
+- **"Which groups am I in" is `/groups/v2/me/groups`.** It was 10.3's
+  recommendation on cost grounds; it is now the only door that was correct
+  on every run, updated immediately on a join, and excluded dead groups.
+- **"What is my role in group X" is the caller's row in
+  `/groups/v2/groups/{id}/memberships`**, read from the group's side. Scan for
+  the caller's person id; a small group fits on one `per_page=100` page.
+- **Do not use `/groups/v2/people/{id}/memberships` or
+  `/groups/v2/memberships` to answer either question.** They look like the
+  obvious join table and they are silently scoped to a different question.
+- **The 17.5 rule gains a qualifier.** "Prefer a scoped path over a `where`
+  clause" holds - but a scoped path can still be scoped by something the URL
+  does not say. A single door's count agreeing with reality is not
+  verification; 15.2 is the example. Cross-check against a second door on
+  first integration with any church.
+- **A new join is visible immediately** on the Group doors, so a "welcome to
+  your group" moment can be driven by polling `/me/groups` without waiting on
+  anything. Webhooks remain untested (17.2).
+
+### 18.8 Still not tested
+
+- **Archived or deleted.** `GET /groups/v2/groups?where[archive_status]=only`
+  would show whether 2453651 is archived. One request.
+- **The Membership doors' rule from a second caller** - especially one who
+  leads nothing (expect 0 on both) and one who is a plain member at a church
+  where the tester is not.
+- **The 11** in 2453651 (18.3), unobservable while the group 404s.
+- **A pending request.** Whether a request-to-join is visible on any door
+  before approval. Needs a run between request and approval.
+- **The enrollment value set** beyond `request_to_join`/`open` and
+  `closed`/`private`.
+- **Leaving a group** - whether the Group doors drop it as fast as they added
+  one, and whether the Membership doors keep a row the way they did for
+  2453651.
+- **A join through the API.** Everything here watched a Church Center join;
+  whether a member's token can create a membership is still 17.2's open
+  question.
